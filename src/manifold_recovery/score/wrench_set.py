@@ -45,10 +45,12 @@ def _broadcast_bounds(bound, target_shape):
 
 def distance_batch(tau_req: np.ndarray, h: np.ndarray, w_hat: np.ndarray,
                    boxes: WrenchBoxes, params: VesselParams = PARAMS,
-                   iters: int = 300):
+                   iters: int = 300, return_resid: bool = False):
     """tau_req (..., N, 3); h (..., 2); w_hat (..., N, 3).
 
-    Returns d2 (..., N), u_star (..., N, 2), alpha_star (..., N, 3).
+    Returns d2 (..., N), u_star (..., N, 2), alpha_star (..., N, 3), and, if
+    ``return_resid``, the signed per-axis residual (..., N, 3) in
+    (surge N, sway N, yaw Nm) so the certificate can judge axes separately.
     """
     tau_req = np.asarray(tau_req, float)
     w_hat = np.asarray(w_hat, float)
@@ -100,6 +102,8 @@ def distance_batch(tau_req: np.ndarray, h: np.ndarray, w_hat: np.ndarray,
     z = D * z
     resid = np.einsum("...ij,...j->...i", A, z) - tau_req
     d2 = (resid ** 2).sum(-1)
+    if return_resid:
+        return d2, z[..., 0:2], z[..., 2:5], resid
     return d2, z[..., 0:2], z[..., 2:5]
 
 

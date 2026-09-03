@@ -1,10 +1,18 @@
-"""Baseline B1: energy OCP with side-seeded restarts (also the G3/G4 oracle).
+"""Baseline B1: energy OCP with class-seeded restarts (also the G3/G4 oracle; rev 2).
 
-Seed set: straight line; lateral bulges at +-{10, 20} m mid-path (both sides);
-explicit around-north and around-south waypoints clearing the dock block.
-Returns every converged solution with its side signature, the best cost, and
-the set of distinct classes found (``enumerate_classes`` for gate G4 and
-scripts/00_precheck_geometry.py).
+Seed set: straight line; lateral bulges at +-{10, 20} m mid-path; the shared
+north/south detour polylines from ``scenario.DETOUR_POLYLINES`` (identical to
+the proposal-mixture bases, so B1 and the manifold explore the same classes).
+
+Rev 2 hardening (spike run 1: 0/7 seeds converged in 05, a "best cost" from a
+lucky seed in 03):
+- every seed's IPOPT status, slack, and effort are RECORDED, not just kept
+  if converged;
+- ``best`` and ``classes`` are taken only over FEASIBLE solutions
+  (converged AND slack_total <= slack_tol), so a margin-violating point is
+  never quoted as the optimum;
+- ``n_feasible``/``n_converged`` are returned so gates can declare a
+  comparison INCONCLUSIVE instead of failing against a broken oracle.
 """
 from __future__ import annotations
 
@@ -12,7 +20,7 @@ import time
 
 import numpy as np
 
-from ..scenario import Zone
+from ..scenario import Zone, DETOUR_POLYLINES, detour_waypoints
 from ..planner.energy_ocp import EnergyOCP
 from ..certify.cluster import side_signature
 
@@ -25,33 +33,38 @@ def _seeds(x0, zone: Zone, n_pts: int = 41):
     perp = np.array([-d[1], d[0]])
     perp = perp / np.linalg.norm(perp)
     bump = np.sin(np.pi * t[:, 0])[:, None]
-    seeds = [base]
+    seeds = [("straight", base)]
     for off in (10.0, 20.0, -10.0, -20.0):
-        seeds.append(base + off * bump * perp)
-    # explicit detours around the dock block (north of Dock 1, south of Dock 2)
-    for via in (np.array([-585.0, 250.0]), np.array([-583.0, 186.0])):
-        half = int(n_pts * 0.55)
-        t1 = np.linspace(0, 1, half)[:, None]
-        t2 = np.linspace(0, 1, n_pts - half)[:, None]
-        seeds.append(np.vstack([p0 + t1 * (via - p0), via + t2 * (pg - via)]))
+        seeds.append((f"bulge{off:+.0f}", base + off * bump * perp))
+    for name in DETOUR_POLYLINES:
+        seeds.append((name, detour_waypoints(name, x0, zone, n_pts)))
     return seeds
 
 
-def run_b1(x0_full, zone: Zone, h, alpha_bar, T_h, w_plan, planner: EnergyOCP):
+def run_b1(x0_full, zone: Zone, h, alpha_bar, T_h, w_plan, planner: EnergyOCP,
+           verbose: bool = False):
     t0 = time.perf_counter()
-    sols = []
-    for xi0 in _seeds(x0_full, zone):
+    sols, attempts = [], []
+    for name, xi0 in _seeds(x0_full, zone):
         r = planner.solve(x0_full, h, alpha_bar, w_plan, T_h, warm_xi=xi0)
-        if r.converged:
-            vel = np.gradient(r.xi, axis=0)
-            sig = tuple(side_signature(r.xi[None], vel[None])[0])
-            sols.append({"xi": r.xi, "cost": r.cost, "signature": sig,
-                         "wall": r.wall_time})
+        sig = tuple(int(v) for v in side_signature(r.xi[None])[0])
+        rec = {"seed": name, "xi": r.xi, "cost": r.cost, "signature": sig,
+               "wall": r.wall_time, "converged": r.converged,
+               "feasible": r.feasible, "slack_total": r.slack_total,
+               "status": r.status, "n_attempts": r.n_attempts}
+        attempts.append(rec)
+        if r.feasible:
+            sols.append(rec)
+        if verbose:
+            print(f"    B1 seed {name:10s} {r.status:28s} slack={r.slack_total:7.3f} "
+                  f"cost={r.cost:10.1f} sig={sig} tries={r.n_attempts}")
     wall = time.perf_counter() - t0
     classes = sorted({s["signature"] for s in sols})
     best = min(sols, key=lambda s: s["cost"]) if sols else None
-    return {"solutions": sols, "classes": classes, "best": best,
-            "wall_time": wall}
+    return {"solutions": sols, "attempts": attempts, "classes": classes,
+            "best": best, "wall_time": wall,
+            "n_converged": int(sum(a["converged"] for a in attempts)),
+            "n_feasible": len(sols), "n_seeds": len(attempts)}
 
 
 def enumerate_classes(x0_full, zone, h, alpha_bar, T_h, w_plan, planner):

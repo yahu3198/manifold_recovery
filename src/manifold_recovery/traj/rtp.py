@@ -20,7 +20,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from ..config import TrajectoryCfg
-from ..scenario import Zone
+from ..scenario import Zone, DETOUR_POLYLINES, detour_length
 
 
 def make_basis(N: int, Bw: int, alpha_b: float):
@@ -65,7 +65,17 @@ class RTP:
 
     # -- helpers ------------------------------------------------------------
     def horizon(self, x0: np.ndarray, zone: Zone):
+        """Scalar horizon shared by every candidate for this (x0, zone).
+
+        horizon_mode "straight" keeps the original d/v_nom. "detour" uses the
+        longest admissible detour arc so around-dock classes are traversable at
+        v_nom (the straight-line horizon forced ~2 m/s on a 123-145 m detour).
+        """
         d = float(np.linalg.norm(zone.center - np.asarray(x0[:2], float)))
+        if self.cfg.horizon_mode == "detour":
+            d = max(d, max(detour_length(k, x0, zone) for k in DETOUR_POLYLINES))
+        elif self.cfg.horizon_mode != "straight":
+            raise ValueError(f"unknown horizon_mode: {self.cfg.horizon_mode}")
         T_h = float(np.clip(d / self.cfg.v_nom, self.cfg.T_min, self.cfg.T_max))
         return T_h, T_h / (self.cfg.N - 1)
 

@@ -26,8 +26,12 @@ ab = float(alpha_bar_policy(sig, h1, 1.0, cfg))
 x0f = np.array([*SPIKE_START_POSE[:2], SPIKE_START_POSE[2], 0, 0, 0])
 lines = [f"# Baselines @ h1={h1}, sea state {cfg.data.sea_state}", ""]
 b1 = run_b1(x0f, zone, np.array([h1, 1.0]), ab, T_h, w, planner := EnergyOCP(zone, cfg))
-lines.append(f"B1 restarts: best cost {b1['best']['cost'] if b1['best'] else None}, "
-             f"classes {len(b1['classes'])}, wall {b1['wall_time']:.1f}s")
+lines.append(f"B1 restarts: best FEASIBLE effort {b1['best']['cost'] if b1['best'] else None}, "
+             f"feasible {b1['n_feasible']}/{b1['n_seeds']} (converged {b1['n_converged']}), "
+             f"classes {b1['classes']}, wall {b1['wall_time']:.1f}s")
+for at in b1["attempts"]:
+    lines.append(f"    seed {at['seed']:10s} {at['status']:28s} slack {at['slack_total']:8.3f} "
+                 f"effort {at['cost']:10.1f} sig {at['signature']}")
 b2 = run_b2(SPIKE_START_POSE, zone, [h1, 1.0],
             lambda n: np.broadcast_to(w, (n,) + w.shape), rtp, field, cfg, rng)
 lines.append(f"B2 CEM: best R {b2['best_R']:.1f}, classes {len(b2['classes'])}, "

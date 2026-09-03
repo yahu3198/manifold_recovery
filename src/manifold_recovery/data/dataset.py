@@ -41,26 +41,46 @@ def _draw_h1(n: int, cfg: Config, rng: np.random.Generator) -> np.ndarray:
     return out
 
 
-def shape_weights(R: np.ndarray, h1: np.ndarray, a: float, n_bins: int = 10):
-    """Per-h1-decile shaping. Returns f, and the stratum table for the sidecar."""
+def shape_weights(R: np.ndarray, h1: np.ndarray, a: float, n_bins: int = 10,
+                  mode: np.ndarray | None = None, per_mode: bool = True):
+    """Score shaping f(R) per stratum. Returns f and the stratum table.
+
+    Rev 2: strata are (h1 decile x proposal mode) when ``mode`` is given and
+    ``per_mode`` is True, and each mode's shaped mass inside a decile is
+    rescaled to that mode's sample share. With global shaping (rev 1) the
+    around-dock modes received ~0 mass (a 120-145 m detour always scores below
+    the best 57 m straight path in its decile: R_med -1.8k / -12k vs -1.2k),
+    so the mixture alone could not fix G4. Cross-class ranking is deliberately
+    NOT done here; it happens at fault time through the fine-tune cost.
+    """
     edges = np.quantile(h1, np.linspace(0, 1, n_bins + 1))
     edges[0] -= 1e-9
     edges[-1] += 1e-9
     f = np.zeros_like(R)
     table = []
+    if mode is None or not per_mode:
+        mode = np.zeros(len(R), dtype=int)
+    modes = np.unique(mode)
     for i in range(n_bins):
-        m = (h1 > edges[i]) & (h1 <= edges[i + 1])
-        if m.sum() < 2:
+        m_bin = (h1 > edges[i]) & (h1 <= edges[i + 1])
+        if m_bin.sum() < 2:
             continue
-        Rm, Rmax = np.median(R[m]), R[m].max()
-        span = max(Rmax - Rm, 1e-9)
-        fi = np.exp(a * (R[m] - Rm) / span)
-        fi[R[m] < Rm] = 0.0
-        f[m] = fi
-        ess = float(fi.sum() ** 2 / max((fi ** 2).sum(), 1e-12))
-        table.append({"h1_lo": float(edges[i]), "h1_hi": float(edges[i + 1]),
-                      "R_med": float(Rm), "R_max": float(Rmax),
-                      "n": int(m.sum()), "ess": ess})
+        for k in modes:
+            m = m_bin & (mode == k)
+            if m.sum() < 2:
+                continue
+            Rm, Rmax = np.median(R[m]), R[m].max()
+            span = max(Rmax - Rm, 1e-9)
+            fi = np.exp(a * (R[m] - Rm) / span)
+            fi[R[m] < Rm] = 0.0
+            # rescale so this mode carries its sample share of the decile's mass
+            if fi.sum() > 0:
+                fi *= (m.sum() / m_bin.sum()) / fi.sum() * m_bin.sum()
+            f[m] = fi
+            ess = float(fi.sum() ** 2 / max((fi ** 2).sum(), 1e-12))
+            table.append({"h1_lo": float(edges[i]), "h1_hi": float(edges[i + 1]),
+                          "mode": int(k), "R_med": float(Rm), "R_max": float(Rmax),
+                          "n": int(m.sum()), "ess": ess})
     return f, table
 
 
@@ -70,8 +90,9 @@ def generate(cfg: Config, sampler, out_path: str | Path,
     rng = np.random.default_rng(cfg.data.seed)
     rtp = RTP(cfg.trajectory)
     field = DockField()
-    prop = ProposalSampler(rtp, cfg.data.prop_mid_std_m, rng)
     zone = ZONES[zone_id]
+    prop = ProposalSampler(rtp, cfg.data.prop_mid_std_m, rng, x0=x0, zone=zone,
+                           mix=cfg.data.prop_mix)
     _, dt = rtp.horizon(x0, zone)
     T_h = dt * (cfg.trajectory.N - 1)
 
@@ -83,6 +104,7 @@ def generate(cfg: Config, sampler, out_path: str | Path,
     Rv = np.empty(n)
     w_all = np.empty((n, cfg.trajectory.N, 3), dtype=np.float32)
     sig_all = np.empty(n)
+    mode_all = np.empty(n, dtype=np.int8)
     term_keys = ("J_obs", "J_smooth", "J_feas", "J_effort", "min_clear", "d2_max")
     terms_acc = {k: np.empty(n) for k in term_keys}
 
@@ -90,7 +112,8 @@ def generate(cfg: Config, sampler, out_path: str | Path,
     for s in range(0, n, cfg.data.chunk):
         e = min(s + cfg.data.chunk, n)
         m = e - s
-        om = prop.sample(m, rng)
+        om, mode = prop.sample_with_mode(m, rng)
+        mode_all[s:e] = mode
         w = np.empty((m, cfg.trajectory.N, 3))
         for i in range(m):
             wi, sg = sampler.sample(cfg.data.sea_state, cfg.data.direction,
@@ -108,26 +131,41 @@ def generate(cfg: Config, sampler, out_path: str | Path,
         if verbose:
             print(f"  scored {e}/{n}  ({time.time()-t0:.1f}s)", flush=True)
 
-    f, table = shape_weights(Rv, h1, cfg.model.a_shaping)
+    f, table = shape_weights(Rv, h1, cfg.model.a_shaping, mode=mode_all,
+                             per_mode=cfg.data.shape_per_mode)
     c = h1[:, None].astype(float)                       # spike condition = [h1]
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
         out_path, omega=omega, c=c, h1=h1, h2=h2, g_id=np.full(n, zone_id),
         R=Rv, f_weight=f, w_seg=w_all, sigma_theta=sig_all,
-        x0=np.asarray(x0, float), dt=dt,
+        prop_mode=mode_all, x0=np.asarray(x0, float), dt=dt,
         **{f"terms_{k}": v for k, v in terms_acc.items()},
     )
     ess_total = float(f.sum() ** 2 / max((f ** 2).sum(), 1e-12))
+    # Which proposal modes survive score shaping (f > 0)? If a detour mode has
+    # ~0 surviving mass the manifold cannot learn that class (G4 diagnostic).
+    mode_table = []
+    for k in range(int(mode_all.max()) + 1):
+        mk = mode_all == k
+        mode_table.append({"mode": k, "n": int(mk.sum()),
+                           "n_kept": int((f[mk] > 0).sum()),
+                           "f_mass": float(f[mk].sum() / max(f.sum(), 1e-12)),
+                           "R_med": float(np.median(Rv[mk])) if mk.any() else float("nan")})
     sidecar = {
         "config_hash": cfg.hash(), "n_samples": n, "zone_id": zone_id,
         "inversion_mode": inversion_mode, "ess_total": ess_total,
         "strata": table, "dt": dt, "T_h": T_h,
         "holdout_h1": list(cfg.data.h1_holdout),
+        "prop_mix": list(cfg.data.prop_mix), "prop_modes": mode_table,
+        "horizon_mode": cfg.trajectory.horizon_mode,
     }
     out_path.with_suffix(".json").write_text(json.dumps(sidecar, indent=2))
     if verbose:
         print(f"dataset -> {out_path}  ESS_total={ess_total:.0f}")
+        for row in mode_table:
+            print(f"  mode {row['mode']}: n={row['n']} kept={row['n_kept']} "
+                  f"f_mass={row['f_mass']:.2f} R_med={row['R_med']:.0f}")
     return out_path
 
 

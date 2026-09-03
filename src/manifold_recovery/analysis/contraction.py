@@ -41,8 +41,9 @@ def compute_maps(decode_fn, cfg: Config, sampler, rng,
     compute only V_proposal (useful before training)."""
     rtp = RTP(cfg.trajectory)
     field = DockField()
-    prop = ProposalSampler(rtp, cfg.data.prop_mid_std_m, rng)
     zone = ZONES[zone_id]
+    prop = ProposalSampler(rtp, cfg.data.prop_mid_std_m, rng, x0=x0, zone=zone,
+                           mix=cfg.data.prop_mix)
     T_h, dt = rtp.horizon(x0, zone)
     rows = []
     for deg in severities:

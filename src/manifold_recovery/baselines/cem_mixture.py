@@ -19,7 +19,8 @@ def run_b2(x0, zone, h, w_seg_fn, rtp, field, cfg, rng,
            sigma0: float = 1.0, shrink: float = 0.85):
     from ..data.proposal import ProposalSampler
     t0 = time.perf_counter()
-    prop = ProposalSampler(rtp, cfg.data.prop_mid_std_m, rng)
+    prop = ProposalSampler(rtp, cfg.data.prop_mid_std_m, rng, x0=x0, zone=zone,
+                           mix=cfg.data.prop_mix)
     means = prop.sample(n_comp, rng)
     sig = sigma0 * np.abs(means).mean() + 1e-3
     best = {"R": -np.inf, "omega": None}

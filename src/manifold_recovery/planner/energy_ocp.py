@@ -34,9 +34,20 @@ class PlanResult:
     X: np.ndarray           # (6, N_ocp+1) full states
     U: np.ndarray           # (2, N_ocp)
     alpha: np.ndarray       # (3, N_ocp)
-    cost: float             # effort integral only (slack excluded)
-    converged: bool
+    cost: float             # effort integral ONLY (slack and regularisers excluded)
+    converged: bool         # IPOPT Solve_Succeeded or Solved_To_Acceptable_Level
     wall_time: float
+    slack_total: float = 0.0    # sum of dock slacks (m); > slack_tol = margin violated
+    slack_max: float = 0.0
+    obj_total: float = float("nan")   # effort + reg + w_slack * slack (what IPOPT minimised)
+    status: str = ""            # IPOPT return_status of the final attempt
+    n_attempts: int = 1
+
+    @property
+    def feasible(self) -> bool:
+        """Converged AND dock margins honoured. Only feasible solutions may be
+        quoted as an optimum (G3b) or counted as a class (G4)."""
+        return bool(self.converged and self._slack_ok)
 
 
 def _lse_max(vals, k: float = 1.0):
@@ -117,10 +128,12 @@ class EnergyOCP:
         reg = 1e-4 * ca.sumsqr(A) + 1e-6 * ca.sumsqr(U[:, 1:] - U[:, :-1])
         obj = effort + reg + pc.w_slack * ca.sum1(ca.sum2(S))
         opti.minimize(obj)
+        self._obj = obj
         opti.solver("ipopt", {"print_time": False},
                     {"print_level": 0, "sb": "yes",
                      "max_iter": pc.ipopt_max_iter,
-                     "acceptable_tol": 1e-4, "tol": 1e-6})
+                     "acceptable_tol": 1e-4, "tol": 1e-6,
+                     "acceptable_iter": 5})
         self.opti = opti
         self._vars = (X, U, A, S)
         self._pars = (P_x0, P_h, P_ab, P_dt, P_w)
@@ -147,8 +160,17 @@ class EnergyOCP:
     def solve(self, x0: np.ndarray, h: np.ndarray, alpha_bar: float,
               w_traj: np.ndarray, T_h: float,
               warm_xi: np.ndarray | None = None) -> PlanResult:
-        """w_traj: (>=N_ocp, 3) force realisation on the plan horizon."""
+        """w_traj: (>=N_ocp, 3) force realisation on the plan horizon.
+
+        Rev 2: (i) thrust initial guess from drag balance at the seed speed,
+        split by health (0.2 u_max = 940 N total against ~250 N drag at 1 m/s
+        started IPOPT far from feasibility); (ii) on non-convergence, up to
+        cfg.planner.ipopt_retries warm re-solves from the last iterate;
+        (iii) slack and IPOPT status are reported so callers can distinguish
+        "converged to a margin-violating point" from a true optimum.
+        """
         N = self.cfg.planner.N_ocp
+        pc, p = self.cfg.planner, self.params
         dt = T_h / N
         X, U, A, S = self._vars
         P_x0, P_h, P_ab, P_dt, P_w = self._pars
@@ -165,22 +187,49 @@ class EnergyOCP:
         else:
             Xg = self._warm_from_xi(
                 np.linspace(x0[:2], self.zone.center, N + 1), x0, dt)
+        # Drag-balance thrust guess: total = (|xu| + |xuu| sp) sp, shared in
+        # proportion to health so the degraded thruster is not over-seeded.
+        sp = np.clip(Xg[3, :N], 0.05, None)
+        drag = (abs(p.xu) + abs(p.xuu) * sp) * sp
+        hh = np.clip(np.asarray(h, float), 1e-3, 1.0)
+        share = hh / hh.sum()
+        Ug = np.clip(np.outer(share, drag) / hh[:, None], 0.0, p.u_max)
         o.set_initial(X, Xg)
-        o.set_initial(U, np.full((2, N), 0.2 * self.params.u_max))
+        o.set_initial(U, Ug)
         o.set_initial(A, np.full((3, N), 0.5 * max(alpha_bar, 1e-3)))
         o.set_initial(S, np.zeros((len(DOCK_VERTICES), N + 1)))
 
         t0 = time.perf_counter()
-        try:
-            sol = o.solve()
-            ok = True
-        except RuntimeError:
-            sol = o.debug
-            ok = False
+        ok, status, attempts = False, "", 0
+        sol = None
+        for attempt in range(1 + max(int(pc.ipopt_retries), 0)):
+            attempts += 1
+            try:
+                sol = o.solve()
+                status = str(sol.stats().get("return_status", ""))
+                ok = status in ("Solve_Succeeded", "Solved_To_Acceptable_Level")
+            except RuntimeError:
+                sol = o.debug
+                status = str(o.stats().get("return_status", "exception"))
+                ok = False
+            if ok:
+                break
+            # warm the next attempt from the last iterate
+            o.set_initial(X, np.asarray(sol.value(X)))
+            o.set_initial(U, np.asarray(sol.value(U)))
+            o.set_initial(A, np.asarray(sol.value(A)))
+            o.set_initial(S, np.asarray(sol.value(S)))
         wall = time.perf_counter() - t0
         Xv = np.asarray(sol.value(X))
-        return PlanResult(xi=Xv[0:2, :].T, X=Xv,
-                          U=np.asarray(sol.value(U)),
-                          alpha=np.asarray(sol.value(A)),
-                          cost=float(sol.value(self._effort)),
-                          converged=ok, wall_time=wall)
+        Sv = np.asarray(sol.value(S))
+        res = PlanResult(xi=Xv[0:2, :].T, X=Xv,
+                         U=np.asarray(sol.value(U)),
+                         alpha=np.asarray(sol.value(A)),
+                         cost=float(sol.value(self._effort)),
+                         converged=ok, wall_time=wall,
+                         slack_total=float(np.clip(Sv, 0.0, None).sum()),
+                         slack_max=float(np.clip(Sv, 0.0, None).max()),
+                         obj_total=float(sol.value(self._obj)),
+                         status=status, n_attempts=attempts)
+        res._slack_ok = res.slack_total <= pc.slack_tol
+        return res

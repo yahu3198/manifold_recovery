@@ -22,6 +22,12 @@ class TrajectoryCfg:
     v_nom: float = 1.0
     T_min: float = 40.0
     T_max: float = 150.0
+    # "straight": T_h = |p_g - p_0| / v_nom (original spike behaviour).
+    # "detour":   T_h = max(straight, longest DETOUR_POLYLINES arc) / v_nom, so
+    #             around-dock classes are traversable at v_nom and severe faults
+    #             are not forced to the straight-line speed (ICRA 95% cases ran
+    #             at ~0.4 m/s). Changes the config hash: regenerate from 01.
+    horizon_mode: str = "straight"
 
 
 @dataclass(frozen=True)
@@ -32,7 +38,13 @@ class WrenchCfg:
     rho_u_frac: float = 0.05
     rho_a: float = 0.05
     rho_growth_T: float = 60.0
-    eps_cert: float = 25.0
+    eps_cert: float = 25.0       # N^2 on max_k (r_x^2 + r_psi^2): thruster axes only
+    sway_drift_frac: float = 0.5 # sway criterion: sum_k |r_y,k| / |Y_v| * dt (the uncorrected
+                                 # lateral drift the sway residual would cause) must stay
+                                 # below sway_drift_frac * exact.e_max. Twin thrusters cannot
+                                 # produce sway at ANY health, so the sway residual is a
+                                 # sideslip demand, not an actuator infeasibility; it is
+                                 # bounded here and arbitrated by the tier-2 rollout.
     pgd_iters: int = 300
     cert_iters: int = 1500
     R0: float = 0.001
@@ -61,6 +73,10 @@ class DataCfg:
     chunk: int = 512
     seed: int = 0
     prop_mid_std_m: float = 3.0
+    # Proposal mixture weights over (straight, north detour, south detour) bases.
+    # (1, 0, 0) reproduces the original single-mode STOMP proposal.
+    prop_mix: tuple = (0.6, 0.2, 0.2)
+    shape_per_mode: bool = True   # score shaping within (decile x mode); False = rev 1 global
 
 
 @dataclass(frozen=True)
@@ -90,6 +106,8 @@ class OnlineCfg:
 class PlannerCfg:
     N_ocp: int = 40
     ipopt_max_iter: int = 400
+    ipopt_retries: int = 2       # warm re-solves from the last iterate on non-convergence
+    slack_tol: float = 0.05      # m; total dock slack above this = constraint-violating
     dock_margin: float = 1.5
     w_slack: float = 1e4
 

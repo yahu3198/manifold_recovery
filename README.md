@@ -18,6 +18,7 @@ pip install pytest
 ## Spike workflow (in order)
 
 ```bash
+source .venv/bin/activate
 pytest tests/ -q                          # Phase 0-2 invariants
 python scripts/00_precheck_geometry.py    # G4 prerequisite: >= 2 classes exist
 python scripts/01_generate_data.py        # 8k samples, ~20 s, synthetic w_hat

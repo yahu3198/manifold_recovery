@@ -19,7 +19,8 @@ def run_b3(x0, zone, h1, w_seg_fn, rtp, field, cfg, rng,
     from ..features.condition import Standardizer
 
     t0 = time.perf_counter()
-    prop = ProposalSampler(rtp, cfg.data.prop_mid_std_m, rng)
+    prop = ProposalSampler(rtp, cfg.data.prop_mid_std_m, rng, x0=x0, zone=zone,
+                           mix=cfg.data.prop_mix)
     om = prop.sample(n_data, rng)
     h = np.tile([h1, 1.0], (n_data, 1))
     R, _ = score_batch(om, h, w_seg_fn(n_data), x0, zone, rtp, field, cfg)

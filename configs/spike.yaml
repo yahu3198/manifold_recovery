@@ -1,4 +1,5 @@
-trajectory: {N: 80, Bw: 20, alpha_basis: 50.0, ramp_eps: 0.1, v_nom: 1.0, T_min: 40.0, T_max: 150.0}
+trajectory: {N: 80, Bw: 20, alpha_basis: 50.0, ramp_eps: 0.1, v_nom: 1.0, T_min: 40.0, T_max: 150.0,
+             horizon_mode: detour}   # rev 2: longest detour arc / v_nom (~144 s); 'straight' = rev 1
 wrench:
   u_max: 2353.0        # FROM_REPO generate_c_code.py ubu
   l: 2.05427           # FROM_REPO wamv.py 'B' thruster separation
@@ -6,11 +7,12 @@ wrench:
   rho_u_frac: 0.05
   rho_a: 0.05
   rho_growth_T: 60.0   # seconds for margins to double (time-growing rho_k)
-  eps_cert: 25.0       # N^2 on max_k d2_k. Phase-1 calibration: the crab-angle grid
-                       # (41 pts over +-25 deg) has an irreducible sway-residual floor
-                       # of 4-6 N (17-30 N^2) even for near-feasible trajectories; 5 N
-                       # unmodeled force shifts equilibrium speed ~2 cm/s vs 250 N
-                       # damping, well inside the tier-2 rollout tolerance (e_max 5 m).
+  eps_cert: 25.0       # N^2 on max_k (r_x^2 + r_psi^2), THRUSTER AXES ONLY (rev 2).
+  sway_drift_frac: 0.5 # rev 2: sway residual judged as uncorrected lateral drift <= 0.5 e_max.
+                       # Phase-1 note kept for eps_cert: the crab-angle grid (41 pts over
+                       # +-25 deg) has an irreducible residual floor of 4-6 N; a peak sway
+                       # bound at that level rejected ~half of healthy-vessel proposals whose
+                       # integrated drift was only ~1.3 m (run-1 diagnostic).
   pgd_iters: 300       # score-level FISTA budget (soft signal)
   cert_iters: 1500     # certificate-level budget (near-threshold accuracy)
   R0: 0.001            # FROM_REPO generate_c_code.py W_u
@@ -28,8 +30,10 @@ data:
   chunk: 512
   seed: 0
   prop_mid_std_m: 3.0
+  prop_mix: [0.6, 0.2, 0.2]   # rev 2: straight / north detour / south detour bases
 model: {latent_dim: 1, hidden: [256, 256], gamma: 10.0, Cz_max: 5.0, a_shaping: 10.0,
         lr: 1.0e-3, batch: 256, epochs: 700, recon_sigma: 1.0, seed: 0}
 online: {K: 100, z_lo: -1.64, z_hi: 1.64, k_present: 3, beta_max_deg: 25.0}
-planner: {N_ocp: 40, ipopt_max_iter: 400, dock_margin: 1.5, w_slack: 1.0e+4}
+planner: {N_ocp: 80, ipopt_max_iter: 400, ipopt_retries: 2, slack_tol: 0.05, dock_margin: 1.5, w_slack: 1.0e+4}
+         # N_ocp 40 -> 80 keeps the OCP step ~1.8 s at the detour horizon
 exact: {dt_sim: 0.1, kp: 0.2, kd: 0.9, kpsi: 0.4, kr: 1.2, e_max: 5.0, arrive_tol: 1.5}

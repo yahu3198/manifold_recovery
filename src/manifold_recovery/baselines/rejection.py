@@ -17,7 +17,8 @@ from ..data.proposal import ProposalSampler
 
 def run_b4(x0, zone, h1, h2, w_seg, sigma_theta, rtp, field, cfg, rng,
            wall_budget_s: float, batch: int = 200):
-    prop = ProposalSampler(rtp, cfg.data.prop_mid_std_m, rng)
+    prop = ProposalSampler(rtp, cfg.data.prop_mid_std_m, rng, x0=x0, zone=zone,
+                           mix=cfg.data.prop_mix)
     t0 = time.perf_counter()
     n_tried = n_ok = 0
     reps = {}
