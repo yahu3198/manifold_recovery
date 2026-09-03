@@ -1,0 +1,13 @@
+numpy
+scipy
+matplotlib
+pyyaml
+pandas
+shapely
+casadi
+
+[logs]
+rosbags
+
+[model]
+torch

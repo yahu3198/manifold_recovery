@@ -1,0 +1,35 @@
+trajectory: {N: 80, Bw: 20, alpha_basis: 50.0, ramp_eps: 0.1, v_nom: 1.0, T_min: 40.0, T_max: 150.0}
+wrench:
+  u_max: 2353.0        # FROM_REPO generate_c_code.py ubu
+  l: 2.05427           # FROM_REPO wamv.py 'B' thruster separation
+  alpha_bar: 1.0       # score-level cap; certificate uses alpha_bar_policy
+  rho_u_frac: 0.05
+  rho_a: 0.05
+  rho_growth_T: 60.0   # seconds for margins to double (time-growing rho_k)
+  eps_cert: 25.0       # N^2 on max_k d2_k. Phase-1 calibration: the crab-angle grid
+                       # (41 pts over +-25 deg) has an irreducible sway-residual floor
+                       # of 4-6 N (17-30 N^2) even for near-feasible trajectories; 5 N
+                       # unmodeled force shifts equilibrium speed ~2 cm/s vs 250 N
+                       # damping, well inside the tier-2 rollout tolerance (e_max 5 m).
+  pgd_iters: 300       # score-level FISTA budget (soft signal)
+  cert_iters: 1500     # certificate-level budget (near-threshold accuracy)
+  R0: 0.001            # FROM_REPO generate_c_code.py W_u
+  gamma_R: 0.01        # FROM_REPO fallback (paper R(H)=R0+gamma*diag(1-h))
+  kappa: 1.5           # EAMPC confidence policy
+  eps_conf: 0.01
+score: {lambda_o: 1.0, lambda_s: 0.1, lambda_f: 10.0, lambda_e: 0.01, eps_obs: 3.0}
+data:
+  n_samples: 8000
+  h1_range: [0.05, 1.0]
+  h1_holdout: [0.20, 0.30]
+  h2_fixed: 1.0
+  sea_state: 3
+  direction: nominal
+  chunk: 512
+  seed: 0
+  prop_mid_std_m: 3.0
+model: {latent_dim: 1, hidden: [256, 256], gamma: 10.0, Cz_max: 5.0, a_shaping: 10.0,
+        lr: 1.0e-3, batch: 256, epochs: 700, recon_sigma: 1.0, seed: 0}
+online: {K: 100, z_lo: -1.64, z_hi: 1.64, k_present: 3, beta_max_deg: 25.0}
+planner: {N_ocp: 40, ipopt_max_iter: 400, dock_margin: 1.5, w_slack: 1.0e+4}
+exact: {dt_sim: 0.1, kp: 0.2, kd: 0.9, kpsi: 0.4, kr: 1.2, e_max: 5.0, arrive_tol: 1.5}
