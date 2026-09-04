@@ -1,13 +1,18 @@
-# Baselines @ h1=0.25, sea state 3
+# Baselines @ h1=0.25, sea state 3, canonical start
 
-B1 restarts: best FEASIBLE effort 457.9250296087958, feasible 4/7 (converged 4), classes [(0, 0)], wall 88.6s
-    seed straight   Solve_Succeeded              slack    0.000 effort    24680.5 sig (0, 0)
-    seed bulge+10   Maximum_Iterations_Exceeded  slack   13.851 effort    16981.7 sig (0, 0)
-    seed bulge+20   Restoration_Failed           slack   88.957 effort    29349.2 sig (0, 0)
-    seed bulge-10   Solve_Succeeded              slack    0.000 effort      457.9 sig (0, 0)
-    seed bulge-20   Solve_Succeeded              slack    0.000 effort      463.3 sig (0, 0)
-    seed north      Solve_Succeeded              slack    0.000 effort     1368.5 sig (0, 0)
-    seed south      Maximum_Iterations_Exceeded  slack   89.508 effort   253652.1 sig (0, 0)
-B2 CEM: best R -1753.0, classes 3, wall 5.8s
-B4 rejection (5s): acceptance 0.892 over 1200 samples, classes 3
-B3 per-instance LSMO: wall 3.0s (n_train 750)
+B1 restarts: best FEASIBLE effort 85265.96628128215, feasible 7/12 (converged 11), classes [(0, 0, 0), (1, 0, 0)], wall 98.9s
+    Zone 1 via       Solve_Succeeded              slack    0.000 effort   105079.1 sig (0, 0, 0)
+    Zone 1 chord     Solve_Succeeded              slack    0.000 effort   158263.7 sig (0, 0, 0)
+    Zone 1 bulge+12  Solve_Succeeded              slack    0.000 effort   105079.1 sig (0, 0, 0)
+    Zone 1 bulge-12  Solve_Succeeded              slack    0.000 effort   105079.1 sig (0, 0, 0)
+    Zone 2 via       Maximum_Iterations_Exceeded  slack    1.295 effort    92741.3 sig (-1, 0, 0)
+    Zone 2 chord     Solve_Succeeded              slack    0.000 effort    85266.0 sig (1, 0, 0)
+    Zone 2 bulge+12  Solve_Succeeded              slack    0.000 effort    85266.0 sig (1, 0, 0)
+    Zone 2 bulge-12  Solve_Succeeded              slack    0.000 effort    85266.0 sig (1, 0, 0)
+    Zone 3 via       Solve_Succeeded              slack    0.807 effort   134898.5 sig (2, 0, 0)
+    Zone 3 chord     Solve_Succeeded              slack    0.807 effort   136538.8 sig (2, 0, 0)
+    Zone 3 bulge+12  Solve_Succeeded              slack    0.807 effort    95817.3 sig (2, 0, 0)
+    Zone 3 bulge-12  Solve_Succeeded              slack    0.807 effort    96517.5 sig (2, 0, 0)
+B2 CEM: best R -1250.6, classes 2 [(np.int64(-1), np.int64(0), np.int64(0)), (np.int64(1), np.int64(0), np.int64(0))], wall 6.3s
+B4 rejection (5s): acceptance 0.754 over 1000 samples, classes 3 [(0, 0, 0), (1, 0, 0), (2, 0, 0)]
+B3 per-instance LSMO: wall 3.4s (n_train 750)

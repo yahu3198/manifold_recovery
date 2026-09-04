@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from ..config import Config
-from ..scenario import Zone
+from ..scenario import ZONES, zone_of
 from ..certify.exact import rollout_certify, ExactResult
 from ..score.obstacles import DockField
 from ..planner.energy_ocp import EnergyOCP
@@ -30,13 +30,20 @@ class Candidate:
 
 
 def finetune(reps: dict, decoded_xi: np.ndarray, decoded_psi: np.ndarray,
-             omega: np.ndarray, x0: np.ndarray, zone: Zone, h: np.ndarray,
+             omega: np.ndarray, x0: np.ndarray, planners, h: np.ndarray,
              alpha_bar: float, T_h: float, w_plan: np.ndarray,
-             w_true: np.ndarray, w_dt: float, planner: EnergyOCP,
+             w_true: np.ndarray, w_dt: float,
              field_: DockField, cfg: Config) -> list[Candidate]:
+    """``planners`` is a callable Zone -> EnergyOCP (baselines.restarts.PlannerBank).
+    Each representative is refined in the zone its terminal point lies in."""
     out = []
     x0_full = np.array([x0[0], x0[1], x0[2], 0.0, 0.0, 0.0])
     for sig, idx in reps.items():
+        zid = int(zone_of(decoded_xi[idx][-1]))
+        if zid < 0:
+            continue
+        zone = ZONES[zid]
+        planner = planners(zone)
         t0 = time.perf_counter()
         plan = planner.solve(x0_full, h, alpha_bar, w_plan, T_h,
                              warm_xi=decoded_xi[idx])
@@ -44,12 +51,14 @@ def finetune(reps: dict, decoded_xi: np.ndarray, decoded_psi: np.ndarray,
         psi_ref = np.unwrap(np.arctan2(*np.gradient(plan.xi, axis=0).T[::-1]))
         t0 = time.perf_counter()
         cert = rollout_certify(plan.xi, psi_ref, T_h, x0_full, h, alpha_bar,
-                               w_true, w_dt, zone, field_, cfg)
+                               w_true, w_dt, None, field_, cfg)
         t_exact = time.perf_counter() - t0
         out.append(Candidate(xi=plan.xi, omega=omega[idx],
                              zone_id=zone.id, signature=sig,
                              plan_cost=plan.cost, cert=cert,
                              timings={"plan": t_plan, "exact": t_exact,
-                                      "plan_converged": plan.converged}))
+                                      "plan_converged": plan.converged,
+                                      "plan_feasible": plan.feasible,
+                                      "plan_slack": plan.slack_total}))
     out.sort(key=lambda c: (not c.cert.passed, c.plan_cost))
     return out

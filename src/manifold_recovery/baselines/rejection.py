@@ -15,23 +15,22 @@ from ..certify.cluster import cluster
 from ..data.proposal import ProposalSampler
 
 
-def run_b4(x0, zone, h1, h2, w_seg, sigma_theta, rtp, field, cfg, rng,
+def run_b4(x0, h1, h2, w_seg, sigma_theta, rtp, field, cfg, rng,
            wall_budget_s: float, batch: int = 200):
-    prop = ProposalSampler(rtp, cfg.data.prop_mid_std_m, rng, x0=x0, zone=zone,
-                           mix=cfg.data.prop_mix)
+    x0 = np.asarray(x0, float)[:3]
+    prop = ProposalSampler(rtp, cfg.data.prop_mid_std_m, rng, mix=cfg.data.prop_mix)
     t0 = time.perf_counter()
     n_tried = n_ok = 0
     reps = {}
     while time.perf_counter() - t0 < wall_budget_s:
-        om = prop.sample(batch, rng)
+        om = prop.sample(x0, rng, batch)
         w = np.broadcast_to(w_seg, (batch,) + w_seg.shape)
-        cert = certify_batch(om, x0, zone, h1, h2, w, sigma_theta, rtp,
-                             field, cfg)
+        cert = certify_batch(om, x0, h1, h2, w, sigma_theta, rtp, field, cfg)
         n_tried += batch
         ok = np.flatnonzero(cert.mask)
         n_ok += len(ok)
         if len(ok):
-            kin = rtp.kinematics(om[ok], x0, zone)
+            kin = rtp.kinematics(om[ok], x0)
             local = cluster(kin.pos, kin.vel, -cert.max_d2[ok])
             for sig, i in local.items():
                 cand = (float(cert.max_d2[ok][i]), om[ok][i])

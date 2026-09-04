@@ -6,10 +6,13 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from ..scenario import ZONES, DOCK_VERTICES
+from ..scenario import ZONES, DOCK_VERTICES, LAND_VERTICES
 
 
 def _draw_harbor(ax):
+    for v in LAND_VERTICES:
+        V = np.asarray(v + (v[0],))
+        ax.fill(V[:, 0], V[:, 1], color="tan", alpha=0.8, ec="saddlebrown", lw=0.5)
     for v in DOCK_VERTICES:
         V = np.asarray(v + (v[0],))
         ax.fill(V[:, 0], V[:, 1], color="salmon", alpha=0.6, ec="firebrick",
@@ -39,6 +42,10 @@ def plot_trajectories(trajs, colors, title, out, x0=None, lw=1.0, cbar_label=Non
             ax.plot(xi[:, 0], xi[:, 1], color=colors, lw=lw, alpha=0.8)
     if x0 is not None:
         ax.plot(*x0[:2], "k*", ms=12)
+    xs = np.concatenate([np.asarray(xi)[:, 0] for xi in trajs]) if len(trajs) else np.array([-560.0])
+    ys = np.concatenate([np.asarray(xi)[:, 1] for xi in trajs]) if len(trajs) else np.array([220.0])
+    ax.set_xlim(-612.0, max(float(xs.max()), -560.0) + 8.0)
+    ax.set_ylim(min(float(ys.min()), 178.0) - 4.0, max(float(ys.max()), 262.0) + 4.0)
     if sm is not None:
         fig.colorbar(sm, ax=ax, label=cbar_label or "")
     ax.set_title(title)

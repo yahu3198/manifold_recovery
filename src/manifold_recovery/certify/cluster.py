@@ -1,4 +1,9 @@
-"""Homotopy classes via per-obstacle winding signatures (spec 4.3; rev 2).
+"""Recovery classes: (target zone, winding about each dock) (spec 4.3; rev 3).
+
+Rev 3 signature = (zone index of the terminal point, w_Dock1, w_Dock2). With
+the shoreline in place the three physically possible routes are Zone 1 north
+of Dock 1, Zone 2 into the slip, Zone 3 south of Dock 2; the zone index is
+what separates them, the winding numbers catch any loop around a pier.
 
 Rev 1 used the sign of the cross product between the path tangent and the
 vector to each dock centroid at closest approach. For this harbor that is NOT
@@ -24,7 +29,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from ..scenario import DOCK_VERTICES
+from ..scenario import DOCK_VERTICES, zone_of
 
 
 _CENTROIDS = np.array([np.mean(v, axis=0) for v in DOCK_VERTICES])
@@ -50,8 +55,10 @@ def winding_signature(pos: np.ndarray, n_chord: int = 64) -> np.ndarray:
 
 
 def side_signature(pos: np.ndarray, vel: np.ndarray | None = None) -> np.ndarray:
-    """Backward-compatible entry point; ``vel`` is accepted and ignored."""
-    return winding_signature(pos)
+    """(..., N, 2) -> (..., 3) = [terminal zone (-1 if none), w_D1, w_D2]."""
+    pos = np.asarray(pos, float)
+    z = zone_of(pos[..., -1, :])
+    return np.concatenate([z[..., None], winding_signature(pos)], axis=-1)
 
 
 def cluster(pos, vel, score) -> dict:

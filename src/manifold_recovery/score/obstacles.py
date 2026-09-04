@@ -1,19 +1,20 @@
-"""Dock geometry costs (spec 4.4, Osa Eq. 31-32 hinge).
+"""Obstacle geometry costs (spec 4.4, Osa Eq. 31-32 hinge).
 
-Signed distance is computed against precomputed edge arrays (vectorised
-point-segment distances) with an inside test via matplotlib Path; per-point
-shapely calls are avoided for speed. Negative distance = inside a dock.
+Rev 3: the field covers DOCKS AND LAND (``scenario.OBSTACLE_VERTICES``): the
+quay wall, both moles, and the two finger piers. Signed distance is computed
+against precomputed edge arrays (vectorised point-segment distances) with an
+inside test via matplotlib Path. Negative distance = inside an obstacle.
 """
 from __future__ import annotations
 
 import numpy as np
 from matplotlib.path import Path as MplPath
 
-from ..scenario import DOCK_VERTICES
+from ..scenario import OBSTACLE_VERTICES
 
 
 class DockField:
-    def __init__(self, dock_vertices=DOCK_VERTICES):
+    def __init__(self, dock_vertices=OBSTACLE_VERTICES):
         self.paths = [MplPath(np.asarray(v, float)) for v in dock_vertices]
         segs_a, segs_b = [], []
         for v in dock_vertices:

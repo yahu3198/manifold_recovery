@@ -22,12 +22,11 @@ class TrajectoryCfg:
     v_nom: float = 1.0
     T_min: float = 40.0
     T_max: float = 150.0
-    # "straight": T_h = |p_g - p_0| / v_nom (original spike behaviour).
-    # "detour":   T_h = max(straight, longest DETOUR_POLYLINES arc) / v_nom, so
-    #             around-dock classes are traversable at v_nom and severe faults
-    #             are not forced to the straight-line speed (ICRA 95% cases ran
-    #             at ~0.4 m/s). Changes the config hash: regenerate from 01.
-    horizon_mode: str = "straight"
+    # rev 3: "fixed" only. Every candidate shares T_fixed so the start pose and
+    # goal point can vary per sample without per-sample time grids. Implied
+    # speed is path length / T_fixed (0.6-1.2 m/s over the start arc).
+    horizon_mode: str = "fixed"
+    T_fixed: float = 150.0
 
 
 @dataclass(frozen=True)
@@ -39,12 +38,13 @@ class WrenchCfg:
     rho_a: float = 0.05
     rho_growth_T: float = 60.0
     eps_cert: float = 25.0       # N^2 on max_k (r_x^2 + r_psi^2): thruster axes only
-    sway_drift_frac: float = 0.5 # sway criterion: sum_k |r_y,k| / |Y_v| * dt (the uncorrected
-                                 # lateral drift the sway residual would cause) must stay
-                                 # below sway_drift_frac * exact.e_max. Twin thrusters cannot
-                                 # produce sway at ANY health, so the sway residual is a
-                                 # sideslip demand, not an actuator infeasibility; it is
-                                 # bounded here and arbitrated by the tier-2 rollout.
+    sway_drift_rate: float = 0.05 # m/s. Sway criterion (rev 3, horizon-invariant): the
+                                  # mean uncorrected lateral drift RATE mean_k |r_y,k| / |Y_v|
+                                  # must stay below this. Twin thrusters cannot produce sway
+                                  # at any health, so the sway residual is a sideslip demand,
+                                  # not an actuator infeasibility; the tier-2 rollout (e_max)
+                                  # arbitrates. Rev 2's horizon-integrated bound failed 70-80%
+                                  # of healthy-vessel decodes once T_h grew 2.5x.
     pgd_iters: int = 300
     cert_iters: int = 1500
     R0: float = 0.001
@@ -55,6 +55,8 @@ class WrenchCfg:
 
 @dataclass(frozen=True)
 class ScoreCfg:
+    lambda_t: float = 10.0       # rev 3: terminal penalty (m^2 outside the nearest zone), since
+                                 # p_g is part of omega and no longer pinned to a zone centroid
     lambda_o: float = 1.0
     lambda_s: float = 0.1
     lambda_f: float = 10.0
@@ -75,13 +77,22 @@ class DataCfg:
     prop_mid_std_m: float = 3.0
     # Proposal mixture weights over (straight, north detour, south detour) bases.
     # (1, 0, 0) reproduces the original single-mode STOMP proposal.
-    prop_mix: tuple = (0.6, 0.2, 0.2)
-    shape_per_mode: bool = True   # score shaping within (decile x mode); False = rev 1 global
+    # rev 3: proposal modes are the three target zones.
+    prop_mix: tuple = (1.0, 1.0, 1.0)
+    shape_per_mode: bool = True   # score shaping within (decile x mode)
+    # Mode mass inside a decile is proportional to the mode's FEASIBLE share
+    # (fraction of its samples with no collision and d2_max <= share_d2), so
+    # a zone that is unreachable at a given severity fades from the manifold
+    # instead of being forced to carry its sample share (rev 2 error).
+    share_d2: float = 100.0
+    start_d_range: tuple = (100.0, 140.0)
+    start_bearing_deg: tuple = (-35.0, 35.0)
+    start_heading_jitter_deg: float = 45.0
 
 
 @dataclass(frozen=True)
 class ModelCfg:
-    latent_dim: int = 1
+    latent_dim: int = 2           # rev 3: 2 (three classes + endpoint spread)
     hidden: tuple = (256, 256)
     gamma: float = 10.0
     Cz_max: float = 5.0
@@ -96,8 +107,14 @@ class ModelCfg:
 @dataclass(frozen=True)
 class OnlineCfg:
     K: int = 100
-    z_lo: float = -1.64
+    z_lo: float = -1.64           # only used by z_mode = "grid" (1-D latents)
     z_hi: float = 1.64
+    # rev 3: how candidate latents are drawn at fault time.
+    #   "bank": resample stored posterior means of training samples (f-weighted)
+    #           plus jitter z_jitter; never lands in inter-cluster gaps.
+    #   "prior": z ~ N(0, I).   "grid": 1-D linspace (rev 1/2 behaviour).
+    z_mode: str = "bank"
+    z_jitter: float = 0.15
     k_present: int = 3
     beta_max_deg: float = 25.0
 
@@ -107,7 +124,8 @@ class PlannerCfg:
     N_ocp: int = 40
     ipopt_max_iter: int = 400
     ipopt_retries: int = 2       # warm re-solves from the last iterate on non-convergence
-    slack_tol: float = 0.05      # m; total dock slack above this = constraint-violating
+    slack_tol: float = 0.5       # m; max per-knot intrusion into dock_margin that still counts
+                                 # as feasible (0.5 m into a 1.5 m margin leaves 1 m clearance)
     dock_margin: float = 1.5
     w_slack: float = 1e4
 

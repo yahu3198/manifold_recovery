@@ -1,9 +1,12 @@
 """Training loop with G1 diagnostics and a self-contained checkpoint.
 
 Checkpoint contents: state_dict, config dict + hash, omega/c Standardizers,
-training history (loss, recon, KL per epoch), dataset sidecar, scenario
-snapshot (x0, zone id). ``load`` restores everything the online pipeline
-needs; nothing else may be required at fault time.
+training history (loss, recon, KL per epoch), dataset sidecar, and (rev 3)
+a z-bank: the posterior means of the kept training samples with their
+shaping weights and raw conditions, so fault-time decoding can resample
+latents where the aggregate posterior actually has mass instead of walking a
+grid through inter-cluster gaps. ``load`` restores everything the online
+pipeline needs; nothing else may be required at fault time.
 """
 from __future__ import annotations
 
@@ -57,9 +60,14 @@ def train(cfg: Config, dataset, out_path: str | Path, verbose: bool = True):
                   f"recon {hist['recon'][-1]:.3f}  KL {hist['kl'][-1]:.3f}  Cz {Cz:.2f}",
                   flush=True)
 
+    with torch.no_grad():
+        mu_bank, _ = model.encoder(om, c)
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save({
+        "z_bank": mu_bank.numpy().astype(np.float32),
+        "f_bank": f.numpy().astype(np.float32),
+        "c_bank": std_c.inverse(c.numpy()).astype(np.float32),
         "state_dict": model.state_dict(),
         "dim_omega": om.shape[1], "dim_c": c.shape[1],
         "latent": cfg.model.latent_dim, "hidden": tuple(cfg.model.hidden),

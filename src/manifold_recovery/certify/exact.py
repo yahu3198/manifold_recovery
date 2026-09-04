@@ -22,7 +22,7 @@ from matplotlib.path import Path as MplPath
 from ..config import Config
 from ..dynamics.params import VesselParams, PARAMS
 from ..dynamics import fossen
-from ..scenario import Zone
+from ..scenario import Zone, in_any_zone
 from ..score.obstacles import DockField
 from ..score.wrench_set import WrenchBoxes, distance_batch
 
@@ -43,7 +43,7 @@ def _wrap(a):
 
 def rollout_certify(xi_ref: np.ndarray, psi_ref: np.ndarray, T_h: float,
                     x0: np.ndarray, h: np.ndarray, alpha_bar: float,
-                    w_true: np.ndarray, w_dt: float, zone: Zone,
+                    w_true: np.ndarray, w_dt: float, zone: Zone | None,
                     field: DockField, cfg: Config,
                     params: VesselParams = PARAMS) -> ExactResult:
     ec, wc = cfg.exact, cfg.wrench
@@ -67,7 +67,8 @@ def rollout_certify(xi_ref: np.ndarray, psi_ref: np.ndarray, T_h: float,
         return np.array([np.interp(t, t_w, w_true[:, j]) for j in range(3)])
 
     x = np.array([x0[0], x0[1], x0[2], 0.0, 0.0, 0.0], float)
-    zp = MplPath(np.asarray(zone.vertices, float))
+    # rev 3: arrival = inside ANY zone (zone=None) or inside the given zone
+    arrived = (lambda p: bool(in_any_zone(p))) if zone is None else zone.contains
     max_err = 0.0
     min_clear = np.inf
     energy = 0.0
@@ -89,7 +90,7 @@ def rollout_certify(xi_ref: np.ndarray, psi_ref: np.ndarray, T_h: float,
         if min_clear < 0.0:
             return ExactResult(False, max_err, min_clear, arrival, energy,
                                "collision")
-        if np.isnan(arrival) and zp.contains_point(pos):
+        if np.isnan(arrival) and arrived(pos):
             arrival = t
         # PD acceleration command in the plan frame -> body frame
         acc_cmd = ec.kp * (p_r - pos) + ec.kd * (v_r - _world_vel(x))

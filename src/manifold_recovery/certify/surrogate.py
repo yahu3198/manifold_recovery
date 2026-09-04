@@ -1,4 +1,8 @@
-"""Tier-1 surrogate certificate (spec 4.3, R1+R5 corrected; per-axis, rev 2).
+"""Tier-1 surrogate certificate (spec 4.3, R1+R5 corrected; per-axis; rev 3).
+
+Rev 3: x0 may be batched (..., 3); the terminal test is "inside ANY zone";
+the sway criterion is a drift RATE (horizon-invariant); the obstacle field
+includes the shoreline.
 
 - alpha_bar comes from the EAMPC confidence policy (ICRA Eq. 8-9), NOT a
   constant: alpha_bar = min(1, kappa / (sigma_theta + eps)) * mu(H).
@@ -6,7 +10,7 @@
   shrink only the UPPER box bounds (thrusters may idle at zero).
 - Pass iff
       max_k (r_x,k^2 + r_psi,k^2)        <= eps_cert                   (thruster axes, N^2)
-  AND sum_k |r_y,k| / |Y_v| * dt         <= sway_drift_frac * e_max    (sway axis, m)
+  AND mean_k |r_y,k| / |Y_v|             <= sway_drift_rate           (sway axis, m/s)
   AND no dock collision AND terminal in zone.
   The sway criterion is the lateral drift the residual would cause if never
   corrected (linear damping, conservative), so it is directly comparable to
@@ -30,11 +34,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-from matplotlib.path import Path as MplPath
-
 from ..config import Config
 from ..dynamics.params import VesselParams, PARAMS
-from ..scenario import Zone
+from ..scenario import in_any_zone
 from ..traj.rtp import RTP
 from ..traj.inversion import invert
 from ..score.obstacles import DockField
@@ -68,7 +70,7 @@ class CertResult:
     mask: np.ndarray          # (...,) bool: full certificate
     max_d2: np.ndarray        # (...,) max_k (r_x^2 + r_psi^2): thruster-axis residual
     max_sway: np.ndarray      # (...,) max_k |r_y|: peak sway residual (N), diagnostic
-    sway_drift: np.ndarray    # (...,) integrated uncorrected drift (m), the criterion
+    sway_drift: np.ndarray    # (...,) mean uncorrected drift rate (m/s), the criterion
     max_d2_total: np.ndarray  # (...,) max_k sum over all three axes (legacy diagnostic)
     min_clear: np.ndarray
     terminal_ok: np.ndarray
@@ -97,12 +99,13 @@ class CertResult:
         }
 
 
-def certify_batch(omega: np.ndarray, x0: np.ndarray, zone: Zone,
+def certify_batch(omega: np.ndarray, x0: np.ndarray,
                   h1: float, h2: float, w_seg: np.ndarray, sigma_theta: float,
                   rtp: RTP, field: DockField, cfg: Config,
                   params: VesselParams = PARAMS) -> CertResult:
+    """omega (..., 2+2Bw); x0 (3,) or (..., 3); w_seg (..., N, 3)."""
     ab = float(alpha_bar_policy(sigma_theta, h1, h2, cfg))
-    kin = rtp.kinematics(omega, x0, zone)
+    kin = rtp.kinematics(omega, x0)
     inv = invert(kin, w_seg, alpha_bar_y=ab, params=params, mode="crab",
                  beta_max_deg=cfg.online.beta_max_deg)
     rho_u, rho_a = margin_schedule(cfg.trajectory.N, kin.dt, cfg)
@@ -114,16 +117,14 @@ def certify_batch(omega: np.ndarray, x0: np.ndarray, zone: Zone,
                                          return_resid=True)
     d2_thrust = resid[..., 0] ** 2 + resid[..., 2] ** 2       # surge^2 + yaw^2
     sway = np.abs(resid[..., 1])
-    sway_drift = (sway / max(abs(params.yv), 1e-9) * kin.dt).sum(axis=-1)
+    sway_drift = (sway / max(abs(params.yv), 1e-9)).mean(axis=-1)
     d = field.signed_distance(kin.pos)
-    zp = MplPath(np.asarray(zone.vertices, float))
-    term = zp.contains_points(kin.pos[..., -1, :].reshape(-1, 2)).reshape(
-        omega.shape[:-1])
+    term = in_any_zone(kin.pos[..., -1, :])
     max_d2 = d2_thrust.max(axis=-1)
     max_sway = sway.max(axis=-1)
     min_clear = d.min(axis=-1)
     thrust_ok = max_d2 <= cfg.wrench.eps_cert
-    sway_ok = sway_drift <= cfg.wrench.sway_drift_frac * cfg.exact.e_max
+    sway_ok = sway_drift <= cfg.wrench.sway_drift_rate
     mask = thrust_ok & sway_ok & (min_clear >= 0.0) & term
     res = CertResult(mask=mask, max_d2=max_d2, max_sway=max_sway, sway_drift=sway_drift,
                      max_d2_total=d2_tot.max(axis=-1), min_clear=min_clear,

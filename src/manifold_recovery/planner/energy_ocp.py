@@ -25,7 +25,7 @@ import numpy as np
 
 from ..config import Config
 from ..dynamics.params import VesselParams, PARAMS
-from ..scenario import Zone, DOCK_VERTICES, _poly_halfspaces
+from ..scenario import Zone, OBSTACLE_VERTICES, _poly_halfspaces
 
 
 @dataclass
@@ -37,7 +37,7 @@ class PlanResult:
     cost: float             # effort integral ONLY (slack and regularisers excluded)
     converged: bool         # IPOPT Solve_Succeeded or Solved_To_Acceptable_Level
     wall_time: float
-    slack_total: float = 0.0    # sum of dock slacks (m); > slack_tol = margin violated
+    slack_total: float = 0.0    # sum of obstacle slacks over all knots (m), diagnostic
     slack_max: float = 0.0
     obj_total: float = float("nan")   # effort + reg + w_slack * slack (what IPOPT minimised)
     status: str = ""            # IPOPT return_status of the final attempt
@@ -45,8 +45,9 @@ class PlanResult:
 
     @property
     def feasible(self) -> bool:
-        """Converged AND dock margins honoured. Only feasible solutions may be
-        quoted as an optimum (G3b) or counted as a class (G4)."""
+        """Converged AND worst per-knot margin intrusion <= planner.slack_tol.
+        Only feasible solutions may be quoted as an optimum (G3b) or counted
+        as a class (G4)."""
         return bool(self.converged and self._slack_ok)
 
 
@@ -67,7 +68,7 @@ class EnergyOCP:
         X = opti.variable(6, N + 1)
         U = opti.variable(2, N)
         A = opti.variable(3, N)
-        S = opti.variable(len(DOCK_VERTICES), N + 1)   # dock slacks >= 0
+        S = opti.variable(len(OBSTACLE_VERTICES), N + 1)   # obstacle slacks >= 0 (docks + land)
 
         P_x0 = opti.parameter(6)
         P_h = opti.parameter(2)
@@ -107,7 +108,7 @@ class EnergyOCP:
         opti.subject_to(X[:, 0] == P_x0)
 
         # dock separation (soft) via stable smooth max of halfspace margins
-        self._dock_hs = [_poly_halfspaces(np.asarray(v, float)) for v in DOCK_VERTICES]
+        self._dock_hs = [_poly_halfspaces(np.asarray(v, float)) for v in OBSTACLE_VERTICES]
         for k in range(N + 1):
             pt = X[0:2, k]
             for j, (Ah, bh) in enumerate(self._dock_hs):
@@ -147,8 +148,10 @@ class EnergyOCP:
         t_tgt = np.linspace(0.0, 1.0, N + 1)
         P = np.stack([np.interp(t_tgt, t_src, xi[:, j]) for j in range(2)], axis=1)
         V = np.gradient(P, dt, axis=0)
-        psi = np.unwrap(np.arctan2(V[:, 1], V[:, 0]))
-        psi[0] = x0[2]
+        # heading guess continuous with the actual start heading (no 2 pi jump
+        # between x0[2] and the first tangent; rev 3 starts face ~west where
+        # arctan2 wraps)
+        psi = np.unwrap(np.concatenate([[float(x0[2])], np.arctan2(V[1:, 1], V[1:, 0])]))
         Xg = np.zeros((6, N + 1))
         Xg[0:2, :] = P.T
         Xg[2, :] = psi
@@ -197,7 +200,7 @@ class EnergyOCP:
         o.set_initial(X, Xg)
         o.set_initial(U, Ug)
         o.set_initial(A, np.full((3, N), 0.5 * max(alpha_bar, 1e-3)))
-        o.set_initial(S, np.zeros((len(DOCK_VERTICES), N + 1)))
+        o.set_initial(S, np.zeros((len(OBSTACLE_VERTICES), N + 1)))
 
         t0 = time.perf_counter()
         ok, status, attempts = False, "", 0
@@ -231,5 +234,6 @@ class EnergyOCP:
                          slack_max=float(np.clip(Sv, 0.0, None).max()),
                          obj_total=float(sol.value(self._obj)),
                          status=status, n_attempts=attempts)
-        res._slack_ok = res.slack_total <= pc.slack_tol
+        # per-knot criterion: the worst single intrusion into the dock margin
+        res._slack_ok = res.slack_max <= pc.slack_tol
         return res

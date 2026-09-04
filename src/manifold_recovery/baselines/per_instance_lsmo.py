@@ -8,7 +8,7 @@ import time
 import numpy as np
 
 
-def run_b3(x0, zone, h1, w_seg_fn, rtp, field, cfg, rng,
+def run_b3(x0, h1, w_seg_fn, rtp, field, cfg, rng,
            n_data: int = 1500, epochs: int = 150):
     import torch
     from ..score.score import score_batch
@@ -19,11 +19,11 @@ def run_b3(x0, zone, h1, w_seg_fn, rtp, field, cfg, rng,
     from ..features.condition import Standardizer
 
     t0 = time.perf_counter()
-    prop = ProposalSampler(rtp, cfg.data.prop_mid_std_m, rng, x0=x0, zone=zone,
-                           mix=cfg.data.prop_mix)
-    om = prop.sample(n_data, rng)
+    x0 = np.asarray(x0, float)[:3]
+    prop = ProposalSampler(rtp, cfg.data.prop_mid_std_m, rng, mix=cfg.data.prop_mix)
+    om = prop.sample(x0, rng, n_data)
     h = np.tile([h1, 1.0], (n_data, 1))
-    R, _ = score_batch(om, h, w_seg_fn(n_data), x0, zone, rtp, field, cfg)
+    R, _ = score_batch(om, h, w_seg_fn(n_data), x0, rtp, field, cfg)
     f, _ = shape_weights(R, np.full(n_data, h1), cfg.model.a_shaping, n_bins=1)
     std = Standardizer.fit(om)
     omt = torch.tensor(std.transform(om), dtype=torch.float32)

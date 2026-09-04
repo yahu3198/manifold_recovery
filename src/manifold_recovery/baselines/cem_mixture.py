@@ -14,15 +14,18 @@ from ..score.score import score_batch
 from ..certify.cluster import side_signature
 
 
-def run_b2(x0, zone, h, w_seg_fn, rtp, field, cfg, rng,
+def run_b2(x0, h, w_seg_fn, rtp, field, cfg, rng,
            n_comp: int = 20, n_per: int = 20, iters: int = 12,
            sigma0: float = 1.0, shrink: float = 0.85):
     from ..data.proposal import ProposalSampler
     t0 = time.perf_counter()
-    prop = ProposalSampler(rtp, cfg.data.prop_mid_std_m, rng, x0=x0, zone=zone,
-                           mix=cfg.data.prop_mix)
-    means = prop.sample(n_comp, rng)
-    sig = sigma0 * np.abs(means).mean() + 1e-3
+    x0 = np.asarray(x0, float)[:3]
+    prop = ProposalSampler(rtp, cfg.data.prop_mid_std_m, rng, mix=cfg.data.prop_mix)
+    means = prop.sample(x0, rng, n_comp)
+    # rev 3: per-dimension noise from the proposal spread (omega now carries
+    # p_g in metres alongside residual weights; a scalar scale was meaningless)
+    ref = prop.sample(x0, rng, 400)
+    sig = sigma0 * ref.std(axis=0) + 1e-3
     best = {"R": -np.inf, "omega": None}
     for _ in range(iters):
         oms = means[:, None, :] + sig * rng.standard_normal(
@@ -30,7 +33,7 @@ def run_b2(x0, zone, h, w_seg_fn, rtp, field, cfg, rng,
         flat = oms.reshape(-1, means.shape[1])
         hM = np.tile(np.asarray(h, float), (len(flat), 1))
         w = w_seg_fn(len(flat))
-        R, terms = score_batch(flat, hM, w, x0, zone, rtp, field, cfg)
+        R, terms = score_batch(flat, hM, w, x0, rtp, field, cfg)
         Rc = R.reshape(n_comp, n_per)
         elite = Rc.argmax(axis=1)
         means = oms[np.arange(n_comp), elite]
@@ -39,7 +42,7 @@ def run_b2(x0, zone, h, w_seg_fn, rtp, field, cfg, rng,
             best = {"R": float(R[i]), "omega": flat[i],
                     "kin": None}
         sig *= shrink
-    kin = rtp.kinematics(means, x0, zone)
+    kin = rtp.kinematics(means, x0)
     sigs = side_signature(kin.pos, kin.vel)
     classes = sorted({tuple(s) for s in sigs})
     return {"best_R": best["R"], "best_omega": best["omega"],
