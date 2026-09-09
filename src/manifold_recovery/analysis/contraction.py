@@ -1,4 +1,7 @@
-"""Manifold contraction metric V(c), lift V / V_proposal, class count N_H, H1-H3 (rev 3).
+"""Manifold contraction metric V(c), lift V / V_proposal, class count N_H, H1-H3 (rev 4).
+
+Rev 4: the decoder is zone-conditioned, so K decodes are split equally across
+the three zones, matching the zone-balanced naive proposal (prop_mix 1:1:1).
 
 V            = certified fraction of K decoded candidates (paper metric).
 V_proposal   = certified fraction of K NAIVE proposal samples (B4 acceptance),
@@ -22,7 +25,6 @@ from ..traj.rtp import RTP
 from ..score.obstacles import DockField
 from ..certify.surrogate import certify_batch
 from ..certify.cluster import side_signature
-from ..features.condition import build_c
 from ..data.proposal import ProposalSampler
 
 ICRA_SUCCESS = {
@@ -53,7 +55,6 @@ def compute_maps(decoder, cfg: Config, sampler, rng,
     rows = []
     for deg in severities:
         h1 = 1.0 - deg
-        c = build_c(h1, x0, spike=True)
         for ss in sea_states:
             for dirn in directions:
                 Vs, Vps, Ns = [], [], []
@@ -62,7 +63,7 @@ def compute_maps(decoder, cfg: Config, sampler, rng,
                     w = w[:cfg.trajectory.N]
                     wb = lambda om: np.broadcast_to(w, (len(om),) + w.shape)
                     if decoder is not None:
-                        om = decoder.decode(c, K, rng)
+                        om, _ = decoder.decode_zones(h1, x0, K, rng)   # K split over zones
                         cert = certify_batch(om, x0, h1, 1.0, wb(om), sig, rtp, field, cfg)
                         Vs.append(cert.mask.mean())
                         ok = np.flatnonzero(cert.mask)

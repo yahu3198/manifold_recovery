@@ -20,13 +20,17 @@ from ..config import Config
 from ..features.condition import Standardizer
 from .cvae import CVAE
 from .losses import weighted_elbo
+from .omega_transform import to_model
 
 
 def train(cfg: Config, dataset, out_path: str | Path, verbose: bool = True):
     torch.manual_seed(cfg.model.seed)
-    std_om = Standardizer.fit(dataset.omega)
+    om_m = to_model(dataset.omega, dataset.g)          # rev 4: zone-relative endpoint
+    std_om = Standardizer.fit(om_m)
     std_c = Standardizer.fit(dataset.c)
-    om = torch.tensor(std_om.transform(dataset.omega), dtype=torch.float32)
+    om = torch.tensor(std_om.transform(om_m), dtype=torch.float32)
+    dim_w = torch.ones(om.shape[1])
+    dim_w[:2] = float(cfg.model.w_pg)                  # endpoint dims weighted
     c = torch.tensor(std_c.transform(dataset.c), dtype=torch.float32)
     f = torch.tensor(dataset.f, dtype=torch.float32)
     keep = f > 0
@@ -47,7 +51,7 @@ def train(cfg: Config, dataset, out_path: str | Path, verbose: bool = True):
             oh, mu, logvar = model(om[idx], c[idx])
             loss, parts = weighted_elbo(oh, om[idx], mu, logvar, f[idx],
                                         cfg.model.gamma, Cz,
-                                        cfg.model.recon_sigma)
+                                        cfg.model.recon_sigma, dim_weights=dim_w)
             opt.zero_grad(); loss.backward(); opt.step()
             ep_loss += float(loss); ep_rec += parts["recon"]; ep_kl += parts["kl"]
             nb += 1
@@ -68,6 +72,8 @@ def train(cfg: Config, dataset, out_path: str | Path, verbose: bool = True):
         "z_bank": mu_bank.numpy().astype(np.float32),
         "f_bank": f.numpy().astype(np.float32),
         "c_bank": std_c.inverse(c.numpy()).astype(np.float32),
+        "g_bank": dataset.g[keep.numpy()].astype(np.int8),
+        "omega_repr": "zone_relative_v4",
         "state_dict": model.state_dict(),
         "dim_omega": om.shape[1], "dim_c": c.shape[1],
         "latent": cfg.model.latent_dim, "hidden": tuple(cfg.model.hidden),

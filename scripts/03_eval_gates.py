@@ -1,6 +1,10 @@
-"""Evaluate gates G1-G4 (spec Section 8; rev 3) and write runs/spike_report.md.
+"""Evaluate gates G1-G4 (spec Section 8; rev 4) and write runs/spike_report.md.
 
-Rev 3 gate definitions (shoreline, any-zone target, sampled start):
+Rev 4: the decoder is zone-conditioned; every decode call splits K across the
+three zones (Decoder.decode_zones) so V is comparable with the zone-balanced
+proposal. G2 additionally prints a per-zone V / V_proposal table at h1 = 0.5.
+
+Gate definitions (unchanged from rev 3):
   G1  KL in [0.3, 1.2 Cz_max] and reconstruction decreased.
   G2  Conditioning works = the manifold BEATS the naive proposal and respects
       severity: mean lift V / V_proposal over the h1 grid >= --min-lift, and
@@ -30,8 +34,8 @@ from manifold_recovery.score.obstacles import DockField
 from manifold_recovery.certify.surrogate import certify_batch, alpha_bar_policy
 from manifold_recovery.data.env_forces import SyntheticSampler
 from manifold_recovery.data.proposal import ProposalSampler
-from manifold_recovery.features.condition import build_c
 from manifold_recovery.analysis.contraction import n_classes
+from manifold_recovery.scenario import zone_of
 from manifold_recovery.analysis.plots import plot_trajectories
 
 p = argparse.ArgumentParser()
@@ -64,7 +68,7 @@ sampler = SyntheticSampler()
 prop = ProposalSampler(rtp, cfg.data.prop_mid_std_m, rng, mix=cfg.data.prop_mix)
 x0c = SPIKE_START_POSE
 PASS, FAIL, INC = "PASS", "FAIL", "INCONCLUSIVE"
-report = ["# Spike report (gates rev 3)", f"config hash: {cfg.hash()}",
+report = ["# Spike report (gates rev 4)", f"config hash: {cfg.hash()}",
           f"T_h = {T_h:.1f} s, z_mode = {cfg.online.z_mode}, latent = {dec.latent}", ""]
 summary = {}
 
@@ -79,22 +83,32 @@ def cert_of(om, x0, h1, w, sig):
     return certify_batch(om, x0, h1, 1.0, wb, sig, rtp, field, cfg)
 
 
-def eval_cell(h1, x0, K, n_env):
-    """Mean over force draws of (V, V_proposal, breakdown); returns last decode too."""
-    Vs, Vps, bds = [], [], []
+def eval_cell(h1, x0, K, n_env, per_zone=False):
+    """Mean over force draws of (V, V_proposal, breakdown); returns last decode too.
+    With per_zone, also returns {zone: (V_z, V_prop_z)} using the target zone of
+    each decode (g) and the terminal zone of each proposal sample."""
+    Vs, Vps, bds, pz = [], [], [], {z.id: [[], []] for z in ZONES}
     last = None
-    c = build_c(h1, x0, spike=True)
     for _ in range(n_env):
         w, sig = draw_forces()
-        om = dec.decode(c, K, rng)
+        om, g = dec.decode_zones(h1, x0, K, rng)
         cert = cert_of(om, x0, h1, w, sig)
-        omp = prop.sample(x0, rng, K)
+        omp, gp = prop.sample_with_mode(np.broadcast_to(np.asarray(x0, float), (K, 3)), rng)
         certp = cert_of(omp, x0, h1, w, sig)
         Vs.append(cert.mask.mean()); Vps.append(certp.mask.mean())
         bds.append(cert.failure_breakdown())
+        for z in ZONES:
+            if (g == z.id).any():
+                pz[z.id][0].append(cert.mask[g == z.id].mean())
+            if (gp == z.id).any():
+                pz[z.id][1].append(certp.mask[gp == z.id].mean())
         last = (w, sig, om, cert)
     bd = {k: float(np.mean([b[k] for b in bds])) for k in bds[0]}
-    return float(np.mean(Vs)), float(np.mean(Vps)), bd, last
+    out = (float(np.mean(Vs)), float(np.mean(Vps)), bd, last)
+    if per_zone:
+        return out + ({k: (float(np.mean(v[0])) if v[0] else np.nan,
+                           float(np.mean(v[1])) if v[1] else np.nan) for k, v in pz.items()},)
+    return out
 
 
 # ---- G1 ----------------------------------------------------------------
@@ -128,6 +142,10 @@ report += [f"## G2 conditioning: {g2}",
 for h, v, vp, l, bd in zip(h1_grid, V, Vp, lift, BD):
     report.append(f"{h:.2f}  {v:.2f}   {vp:.2f}   {l:5.2f}  | {bd['thrust_fail']:.2f}   "
                   f"{bd['sway_fail']:.2f}   {bd['collision']:.2f}      {bd['terminal_fail']:.2f}")
+# per-zone lift at h1 = 0.5 (which zone the model helps with)
+_, _, _, _, pz = eval_cell(0.5, x0c, cfg.online.K, a.n_env, per_zone=True)
+report.append("per-zone @ h1=0.5 (V / V_prop): " + ", ".join(
+    f"{ZONES[k].name} {v[0]:.2f}/{v[1]:.2f}" for k, v in pz.items()))
 # generalisation over the start arc at h1 = 0.5
 starts = sample_start(rng, a.n_starts, cfg.data.start_d_range, cfg.data.start_bearing_deg,
                       cfg.data.start_heading_jitter_deg)
@@ -159,7 +177,6 @@ if not a.skip_planner:
         g3b = INC
         report += [f"(b) {g3b}: " + ("no certified decode" if len(ok) == 0 else "no feasible B1"), line]
     else:
-        from manifold_recovery.scenario import zone_of
         best_i = ok[np.argmin(cert.max_d2[ok])]
         kin = rtp.kinematics(om[best_i][None], x0c)
         zid = int(zone_of(kin.pos[0, -1]))
@@ -185,10 +202,9 @@ if not a.skip_planner:
     report.append("## G4 class coverage (zone, winding)")
     for h1c in (0.9, 0.5):
         n_all, n_cert, n_ok, n_b1, b1_cls = [], [], 0, [], set()
-        c = build_c(h1c, x0c, spike=True)
         for _ in range(a.n_env):
             w2, sg2 = draw_forces()
-            om2 = dec.decode(c, cfg.online.K, rng)
+            om2, _ = dec.decode_zones(h1c, x0c, cfg.online.K, rng)
             c2 = cert_of(om2, x0c, h1c, w2, sg2)
             kin2 = rtp.kinematics(om2, x0c)
             okk = np.flatnonzero(c2.mask); n_ok += len(okk)
@@ -207,7 +223,7 @@ if not a.skip_planner:
     summary["G4"] = g4
 
 # ---- figure ---------------------------------------------------------------
-om_s = dec.decode(build_c(0.5, x0c, spike=True), 60, rng)
+om_s, _ = dec.decode_zones(0.5, x0c, 60, rng)
 kin = rtp.kinematics(om_s, x0c)
 cert_s = cert_of(om_s, x0c, 0.5, *draw_forces())
 plot_trajectories(list(kin.pos), cert_s.mask.astype(float),

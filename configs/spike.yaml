@@ -1,4 +1,4 @@
-# Spike configuration, rev 3 (shoreline, any-zone target, sampled start).
+# Spike configuration, rev 4 (zone-conditioned decoder; rev 3 scenario unchanged).
 trajectory: {N: 80, Bw: 20, alpha_basis: 50.0, ramp_eps: 0.1, v_nom: 1.0, T_min: 40.0, T_max: 150.0,
              horizon_mode: fixed, T_fixed: 150.0}   # rev 3: one horizon for every candidate
 wrench:
@@ -33,7 +33,7 @@ data:
   start_d_range: [100.0, 140.0]      # start arc: distance from the opening (m)
   start_bearing_deg: [-35.0, 35.0]   # bearing from the opening, 0 = due east
   start_heading_jitter_deg: 45.0
-model: {latent_dim: 2, hidden: [256, 256], gamma: 10.0, Cz_max: 5.0, a_shaping: 10.0,
+model: {latent_dim: 2, w_pg: 10.0, hidden: [256, 256], gamma: 10.0, Cz_max: 5.0, a_shaping: 10.0,
         lr: 1.0e-3, batch: 256, epochs: 700, recon_sigma: 1.0, seed: 0}
 online: {K: 100, z_lo: -1.64, z_hi: 1.64, z_mode: bank, z_jitter: 0.15, k_present: 3, beta_max_deg: 25.0}
 planner: {N_ocp: 80, ipopt_max_iter: 400, ipopt_retries: 2, slack_tol: 0.5, dock_margin: 1.5, w_slack: 1.0e+4}

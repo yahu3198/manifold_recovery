@@ -1,5 +1,5 @@
 {
-  "config_hash": "cb71255d64bb",
+  "config_hash": "c08381ed45ed",
   "n_samples": 8000,
   "target": "any_zone",
   "inversion_mode": "crab",
@@ -347,5 +347,5 @@
     }
   ],
   "horizon_mode": "fixed",
-  "dim_c": 4
+  "dim_c": 7
 }

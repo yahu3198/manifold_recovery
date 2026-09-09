@@ -92,7 +92,8 @@ class DataCfg:
 
 @dataclass(frozen=True)
 class ModelCfg:
-    latent_dim: int = 2           # rev 3: 2 (three classes + endpoint spread)
+    latent_dim: int = 2
+    w_pg: float = 10.0            # rev 4: reconstruction weight on the two endpoint dims
     hidden: tuple = (256, 256)
     gamma: float = 10.0
     Cz_max: float = 5.0

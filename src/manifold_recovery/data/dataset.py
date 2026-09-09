@@ -136,7 +136,7 @@ def generate(cfg: Config, sampler, out_path: str | Path,
     feasible = (terms_acc["min_clear"] >= 0.0) & (terms_acc["d2_max"] <= cfg.data.share_d2)
     f, table = shape_weights(Rv, h1, cfg.model.a_shaping, mode=mode_all,
                              per_mode=cfg.data.shape_per_mode, feasible=feasible)
-    c = build_c(h1, x0_all, spike=True)
+    c = build_c(h1, x0_all, mode_all.astype(int), spike=True)      # rev 4: zone in c
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
@@ -182,6 +182,7 @@ class ManifoldDataset:
         self.f = d["f_weight"].astype(np.float32)
         self.R = d["R"].astype(np.float32)
         self.x0 = d["x0"]
+        self.g = d["g_id"].astype(int)
         self.meta = json.loads(Path(npz_path).with_suffix(".json").read_text())
 
     def __len__(self):

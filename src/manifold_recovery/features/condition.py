@@ -1,11 +1,11 @@
 """Condition vector c: the SINGLE builder used offline and at fault time.
 
-Rev 3 spike:  c = [h1, dx/100, dy/100, dpsi]
+Rev 4 spike:  c = [h1, dx/100, dy/100, dpsi, onehot(g)]   (dim 4 + n_zones)
   dx, dy = start position relative to the harbor opening centre (m),
-  dpsi   = start heading relative to the bearing toward the opening (rad).
-The start now varies per sample, so the manifold must be told where it is.
-Full build appends h2 and the environment features (w_bar, cos/sin th_w,
-sigma_w, f_dom). One code path for training and deployment.
+  dpsi   = start heading relative to the bearing toward the opening (rad),
+  g      = target zone (the planner's decision variable; the manifold is
+           conditional on it and decodes per zone at fault time).
+Full build appends h2 and the environment features. One code path.
 """
 from __future__ import annotations
 
@@ -13,7 +13,10 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from ..scenario import OPENING_CENTER
+from ..scenario import OPENING_CENTER, ZONES
+
+N_ZONES = len(ZONES)
+DIM_C = 4 + N_ZONES
 
 
 def _wrap(a):
@@ -46,21 +49,26 @@ def start_features(x0: np.ndarray) -> np.ndarray:
     return np.stack([d[..., 0] / 100.0, d[..., 1] / 100.0, dpsi], axis=-1)
 
 
-def build_c(h1, x0: np.ndarray, h2=1.0, w_seg: np.ndarray | None = None,
-            dt: float = 1.0, spike: bool = True) -> np.ndarray:
-    """h1 scalar or (n,); x0 (3,) or (n, 3). Returns (n, dim_c) or (dim_c,)."""
-    h1a = np.asarray(h1, float)
-    sf = start_features(x0)
-    if h1a.ndim == 0 and sf.ndim == 1:
-        c = np.concatenate([[float(h1a)], sf])
-        if not spike:
-            c = np.concatenate([c, [float(h2)], env_features(w_seg, dt)])
-        return c
-    h1a = np.broadcast_to(h1a.reshape(-1), (len(sf.reshape(-1, 3)),))
-    c = np.column_stack([h1a, sf.reshape(-1, 3)])
+def build_c(h1, x0: np.ndarray, g, spike: bool = True) -> np.ndarray:
+    """h1 scalar or (n,); x0 (3,) or (n, 3); g zone index scalar or (n,).
+    Returns (dim_c,) for scalar inputs, else (n, dim_c)."""
     if not spike:
-        raise NotImplementedError("full-build condition vector is per-sample; use the spike path")
-    return c
+        raise NotImplementedError("full-build condition vector not part of the spike")
+    h1a = np.asarray(h1, float).reshape(-1)
+    sf = start_features(x0).reshape(-1, 3)
+    ga = np.asarray(g, int).reshape(-1)
+    n = max(len(h1a), len(sf), len(ga))
+    h1a = np.broadcast_to(h1a, (n,))
+    sf = np.broadcast_to(sf, (n, 3))
+    ga = np.broadcast_to(ga, (n,))
+    onehot = np.eye(N_ZONES)[ga]
+    c = np.column_stack([h1a, sf, onehot])
+    scalar = np.ndim(h1) == 0 and np.asarray(x0).ndim == 1 and np.ndim(g) == 0
+    return c[0] if scalar else c
+
+
+def zone_from_c(c: np.ndarray) -> np.ndarray:
+    return np.argmax(np.asarray(c)[..., 4:4 + N_ZONES], axis=-1)
 
 
 @dataclass

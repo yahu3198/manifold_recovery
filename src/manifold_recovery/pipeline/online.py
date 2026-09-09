@@ -1,8 +1,9 @@
 """The deployable fault-time pipeline (spec 4.7; rev 3); the ROS 2 node wraps this.
 
-propose(): build c (h1 + start pose) -> decode K candidates (z from the
-posterior bank) -> surrogate-certify against ANY zone -> cluster survivors by
-(zone, winding) -> fine-tune + exact-check representatives -> rank.
+propose(): reachability pre-filter -> decode K candidates split across the
+feasible zones (zone one-hot in c, z from the same-zone posterior bank) ->
+surrogate-certify -> cluster survivors by (zone, winding) -> fine-tune +
+exact-check representatives -> rank.
 Per-stage wall times are recorded; ``timing_budget_ok`` implements the
 Corollary 2 detection-delay check.
 """
@@ -15,7 +16,7 @@ import numpy as np
 
 from ..config import Config
 from ..traj.rtp import RTP
-from ..features.condition import build_c
+from ..scenario import feasible_zones
 from ..score.obstacles import DockField
 from ..certify.surrogate import certify_batch, alpha_bar_policy
 from ..certify.cluster import cluster
@@ -50,12 +51,18 @@ class RecoveryPipeline:
         cfg = self.cfg
         tms = {}
         t0 = time.perf_counter()
-        c = build_c(h1, np.asarray(x0[:3], float), spike=True)
+        w_bar = float(np.linalg.norm(w_seg[:, :2], axis=1).mean())
+        zones = feasible_zones(x0, h1, h2, w_bar, cfg.trajectory.v_nom, cfg.trajectory.T_max)
         tms["condition"] = time.perf_counter() - t0
 
         t0 = time.perf_counter()
-        omega = self.decoder.decode(c, cfg.online.K, self.rng)
+        omega, _g = self.decoder.decode_zones(h1, np.asarray(x0[:3], float),
+                                              cfg.online.K, self.rng, zones)
         tms["decode"] = time.perf_counter() - t0
+        if len(omega) == 0:
+            tms["total"] = sum(tms.values())
+            return Proposal(candidates=[], alpha_bar=float(alpha_bar_policy(sigma_theta, h1, h2, cfg)),
+                            n_decoded=0, n_certified=0, timings=tms)
 
         t0 = time.perf_counter()
         T_h, dt = self.rtp.horizon()
