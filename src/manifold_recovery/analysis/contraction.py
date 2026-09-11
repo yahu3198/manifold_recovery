@@ -45,45 +45,93 @@ def n_classes(pos: np.ndarray) -> int:
 def compute_maps(decoder, cfg: Config, sampler, rng,
                  severities=(0.5, 0.75, 0.95, 1.0),
                  sea_states=(2, 3, 4, 5), directions=("nominal",),
-                 K: int = 100, n_env: int = 3, x0=SPIKE_START_POSE) -> pd.DataFrame:
-    """decoder: model.decode.Decoder (or None for proposal-only maps)."""
+                 K: int = 100, n_env: int = 3, x0=SPIKE_START_POSE,
+                 starts=None, verbose: bool = False) -> pd.DataFrame:
+    """decoder: model.decode.Decoder (or None for proposal-only maps).
+
+    Returns ONE ROW PER FORCE DRAW (long format) with columns
+    degradation, h1, sea_state, direction, start, draw, V, V_proposal, N_H.
+    Use ``aggregate`` for cell means with bootstrap confidence intervals.
+    ``starts``: optional (S, 3) array of start poses; default is the
+    canonical start only (start index 0).
+    """
     rtp = RTP(cfg.trajectory)
     field = DockField()
     prop = ProposalSampler(rtp, cfg.data.prop_mid_std_m, rng, mix=cfg.data.prop_mix)
     T_h, dt = rtp.horizon()
-    x0 = np.asarray(x0, float)
+    starts = np.asarray(x0, float)[None, :] if starts is None else np.asarray(starts, float)
     rows = []
-    for deg in severities:
-        h1 = 1.0 - deg
-        for ss in sea_states:
-            for dirn in directions:
-                Vs, Vps, Ns = [], [], []
-                for _ in range(n_env):
-                    w, sig = sampler.sample(ss, dirn, T_h, dt, rng)
-                    w = w[:cfg.trajectory.N]
-                    wb = lambda om: np.broadcast_to(w, (len(om),) + w.shape)
-                    if decoder is not None:
-                        om, _ = decoder.decode_zones(h1, x0, K, rng)   # K split over zones
-                        cert = certify_batch(om, x0, h1, 1.0, wb(om), sig, rtp, field, cfg)
-                        Vs.append(cert.mask.mean())
-                        ok = np.flatnonzero(cert.mask)
-                        Ns.append(n_classes(rtp.kinematics(om[ok], x0).pos) if len(ok) else 0)
-                    omp = prop.sample(x0, rng, K)
-                    certp = certify_batch(omp, x0, h1, 1.0, wb(omp), sig, rtp, field, cfg)
-                    Vps.append(certp.mask.mean())
-                V = float(np.mean(Vs)) if Vs else np.nan
-                Vp = float(np.mean(Vps))
-                rows.append({"degradation": deg, "h1": h1, "sea_state": ss,
-                             "direction": dirn, "V": V, "V_proposal": Vp,
-                             "lift": V / Vp if Vp > 0 else np.nan,
-                             "N_H": float(np.mean(Ns)) if Ns else np.nan})
+    for si, xs in enumerate(starts):
+        for deg in severities:
+            h1 = 1.0 - deg
+            for ss in sea_states:
+                for dirn in directions:
+                    for k in range(n_env):
+                        w, sig = sampler.sample(ss, dirn, T_h, dt, rng)
+                        w = w[:cfg.trajectory.N]
+                        wb = lambda om: np.broadcast_to(w, (len(om),) + w.shape)
+                        V, NH = np.nan, np.nan
+                        if decoder is not None:
+                            om, _ = decoder.decode_zones(h1, xs, K, rng)
+                            cert = certify_batch(om, xs, h1, 1.0, wb(om), sig, rtp, field, cfg)
+                            V = float(cert.mask.mean())
+                            ok = np.flatnonzero(cert.mask)
+                            NH = n_classes(rtp.kinematics(om[ok], xs).pos) if len(ok) else 0
+                        omp = prop.sample(xs, rng, K)
+                        certp = certify_batch(omp, xs, h1, 1.0, wb(omp), sig, rtp, field, cfg)
+                        rows.append({"degradation": deg, "h1": h1, "sea_state": ss,
+                                     "direction": dirn, "start": si, "draw": k,
+                                     "V": V, "V_proposal": float(certp.mask.mean()), "N_H": NH})
+                    if verbose:
+                        print(f"  start {si} deg {deg:.2f} ss {ss}: done", flush=True)
     return pd.DataFrame(rows)
 
 
+def _boot_ci(vals, fn=np.mean, n_boot: int = 1000, rng=None, alpha: float = 0.05):
+    vals = np.asarray(vals, float)
+    vals = vals[np.isfinite(vals)]
+    if len(vals) == 0:
+        return np.nan, np.nan
+    rng = rng or np.random.default_rng(0)
+    idx = rng.integers(0, len(vals), size=(n_boot, len(vals)))
+    stats = fn(vals[idx], axis=1)
+    return float(np.quantile(stats, alpha / 2)), float(np.quantile(stats, 1 - alpha / 2))
+
+
+def aggregate(df_draws: pd.DataFrame, by=("degradation", "h1", "sea_state", "direction"),
+              n_boot: int = 1000, seed: int = 0) -> pd.DataFrame:
+    """Cell means over draws (and starts unless 'start' is in ``by``) with 95 %
+    bootstrap CIs for V, V_proposal and lift (lift = ratio of cell means,
+    bootstrapped over paired draws)."""
+    rng = np.random.default_rng(seed)
+    out = []
+    for key, g in df_draws.groupby(list(by)):
+        V, Vp = g["V"].to_numpy(float), g["V_proposal"].to_numpy(float)
+        n = len(g)
+        row = dict(zip(by, key if isinstance(key, tuple) else (key,)))
+        row.update({"n_draws": n, "V": float(np.nanmean(V)) if np.isfinite(V).any() else np.nan,
+                    "V_proposal": float(np.mean(Vp)),
+                    "N_H": float(np.nanmean(g["N_H"])) if np.isfinite(g["N_H"]).any() else np.nan})
+        row["V_lo"], row["V_hi"] = _boot_ci(V, rng=rng, n_boot=n_boot)
+        row["V_proposal_lo"], row["V_proposal_hi"] = _boot_ci(Vp, rng=rng, n_boot=n_boot)
+        if np.isfinite(V).any() and row["V_proposal"] > 0:
+            row["lift"] = row["V"] / row["V_proposal"]
+            idx = rng.integers(0, n, size=(n_boot, n))
+            num, den = np.nanmean(V[idx], axis=1), np.mean(Vp[idx], axis=1)
+            ratio = np.where(den > 0, num / np.maximum(den, 1e-9), np.nan)
+            row["lift_lo"], row["lift_hi"] = (float(np.nanquantile(ratio, 0.025)),
+                                              float(np.nanquantile(ratio, 0.975)))
+        else:
+            row["lift"] = row["lift_lo"] = row["lift_hi"] = np.nan
+        out.append(row)
+    return pd.DataFrame(out)
+
+
 def h1_test(df: pd.DataFrame):
-    """H1: V decreases with severity (pooled over sea states)."""
-    rho, p = spearmanr(df["degradation"], df["V"])
-    return {"spearman": float(rho), "p": float(p), "pass": rho < -0.5}
+    """H1: V decreases with severity (pooled over sea states; aggregated cells)."""
+    sel = df[np.isfinite(df["V"])]
+    rho, p = spearmanr(sel["degradation"], sel["V"])
+    return {"spearman": float(rho), "p": float(p), "n": int(len(sel)), "pass": rho < -0.5}
 
 
 def h2_test(df: pd.DataFrame, deg: float = 1.0):
@@ -108,11 +156,15 @@ def h3_test(df: pd.DataFrame):
 
 
 def lift_test(df: pd.DataFrame, min_lift: float = 1.5, headroom: float = 0.6):
-    """Pre-registered rev-3 criterion: lift >= min_lift in at least half of the
-    cells where the proposal is starved (V_proposal < headroom)."""
+    """Pre-registered criterion: lift >= min_lift in at least half of the cells
+    where the proposal is starved (V_proposal < headroom). Also reports how
+    many of those cells have a CI lower bound above 1 (lift significant)."""
     sel = df[(df["V_proposal"] < headroom) & np.isfinite(df["lift"])]
     if len(sel) == 0:
         return {"n_cells": 0, "frac_pass": np.nan, "pass": False}
     frac = float((sel["lift"] >= min_lift).mean())
-    return {"n_cells": int(len(sel)), "frac_pass": frac, "median_lift": float(sel["lift"].median()),
-            "pass": frac >= 0.5}
+    out = {"n_cells": int(len(sel)), "frac_pass": frac, "median_lift": float(sel["lift"].median()),
+           "pass": frac >= 0.5}
+    if "lift_lo" in sel:
+        out["n_ci_above_1"] = int((sel["lift_lo"] > 1.0).sum())
+    return out

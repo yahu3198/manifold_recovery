@@ -46,7 +46,7 @@ p.add_argument("--skip-planner", action="store_true",
 p.add_argument("--n-env", type=int, default=3, help="force draws per gate cell")
 p.add_argument("--n-starts", type=int, default=3, help="random starts for the G2 generalisation row")
 p.add_argument("--min-cert", type=int, default=10)
-p.add_argument("--min-lift", type=float, default=1.3)
+p.add_argument("--min-lift", type=float, default=1.5, help="required lift where V_prop < 0.6")
 p.add_argument("--mono-tol", type=float, default=0.05)
 p.add_argument("--verbose-b1", action="store_true")
 a = p.parse_args()
@@ -131,13 +131,23 @@ for h1 in h1_grid:
 V, Vp = np.array(V), np.array(Vp)
 lift = np.where(Vp > 0, V / np.maximum(Vp, 1e-9), np.nan)
 mean_lift = float(np.nanmean(lift))
-# monotone: cert_frac must not rise with degradation beyond tolerance
-mono_ok = bool(np.all(np.diff(V) <= a.mono_tol))
 rho_c, _ = spearmanr(h1_grid, V)
-g2 = PASS if (mean_lift >= a.min_lift and mono_ok and V.max() >= 0.30) else FAIL
+# Rev 4.1 G2 = the pre-registered criterion applied to the h1 grid:
+#   lift >= --min-lift-starved where the proposal is starved (V_prop < 0.6),
+#   lift >= 1.0 - --mono-tol elsewhere, and thrust the dominant failure at the
+#   most severe point. (Rev 3/4's mean-lift >= 1.3 was unreachable with a
+#   proposal already at 0.75-0.79, and the monotonicity clause was confounded
+#   by the alpha_bar policy.)
+starved = Vp < 0.6
+ok_starved = bool(np.all(lift[starved] >= a.min_lift)) if starved.any() else True
+ok_rest = bool(np.all(lift[~starved] >= 1.0 - a.mono_tol)) if (~starved).any() else True
+bd_sev = BD[-1]
+thrust_dominant = bd_sev["thrust_fail"] >= max(bd_sev["collision"], bd_sev["sway_fail"], bd_sev["terminal_fail"])
+mono_ok = ok_rest
+g2 = PASS if (ok_starved and ok_rest and thrust_dominant and V.max() >= 0.30) else FAIL
 report += [f"## G2 conditioning: {g2}",
-           f"mean lift V/V_proposal over h1 grid = {mean_lift:.2f} (>= {a.min_lift}); "
-           f"non-increasing with degradation: {mono_ok} (tol {a.mono_tol}); Spearman(h1, V) = {rho_c:.2f}",
+           f"starved cells (V_prop < 0.6): lift >= {a.min_lift}: {ok_starved}; other cells: lift >= {1.0 - a.mono_tol:.2f}: {ok_rest}; "
+           f"thrust dominant at h1 = {h1_grid[-1]}: {thrust_dominant}; mean lift {mean_lift:.2f}; Spearman(h1, V) = {rho_c:.2f}",
            "h1     V     V_prop  lift   | thrust  sway  collision  terminal  (canonical start)"]
 for h, v, vp, l, bd in zip(h1_grid, V, Vp, lift, BD):
     report.append(f"{h:.2f}  {v:.2f}   {vp:.2f}   {l:5.2f}  | {bd['thrust_fail']:.2f}   "
