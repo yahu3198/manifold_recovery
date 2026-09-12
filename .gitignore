@@ -1,0 +1,33 @@
+# virtual environments
+.venv/
+.venv_ros/
+
+# python build/run residue
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# generated data and results (re-derivable from configs + scripts)
+data_out/
+runs/
+*.npz
+*.png
+*.pdf
+*.csv
+
+# checkpoints (see note below)
+*.pt
+
+# trial outputs written by ros2/run_trials.py and score_trials.py, if under this tree
+experiments/
+logs/
+*.db3
+*.mcap
+
+# editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store

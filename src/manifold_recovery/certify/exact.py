@@ -66,13 +66,18 @@ def rollout_certify(xi_ref: np.ndarray, psi_ref: np.ndarray, T_h: float,
     def w_at(t):
         return np.array([np.interp(t, t_w, w_true[:, j]) for j in range(3)])
 
-    x = np.array([x0[0], x0[1], x0[2], 0.0, 0.0, 0.0], float)
+    # rev 4.2: start from the full state when given (deployment passes the
+    # fault-time velocities; a rest start against a moving reference produced
+    # spurious tracking_error failures)
+    x0 = np.asarray(x0, float)
+    x = x0[:6].copy() if len(x0) >= 6 else np.array([x0[0], x0[1], x0[2], 0.0, 0.0, 0.0], float)
     # rev 3: arrival = inside ANY zone (zone=None) or inside the given zone
     arrived = (lambda p: bool(in_any_zone(p))) if zone is None else zone.contains
     max_err = 0.0
     min_clear = np.inf
     energy = 0.0
     arrival = np.nan
+    e_ct_int = 0.0
     boxes = WrenchBoxes.unshrunk(wc.u_max, alpha_bar)
     w1 = wc.R0 + wc.gamma_R * (1.0 - h[0])
     w2 = wc.R0 + wc.gamma_R * (1.0 - h[1])
@@ -92,14 +97,26 @@ def rollout_certify(xi_ref: np.ndarray, psi_ref: np.ndarray, T_h: float,
                                "collision")
         if np.isnan(arrival) and arrived(pos):
             arrival = t
-        # PD acceleration command in the plan frame -> body frame
-        acc_cmd = ec.kp * (p_r - pos) + ec.kd * (v_r - _world_vel(x))
+            break        # rev 4.2: the mission criterion is reaching a zone; holding
+                         # station inside a 12 m slip is the MPC's job, not this pre-screen's
+        # rev 4.2 tracking law: a twin-thruster hull has no sway authority, so
+        # lateral error must be corrected through heading. Along-track PD on
+        # surge; line-of-sight heading = plan heading + atan(cross-track / L)
+        # (clipped), which is what the earlier world-frame PD lacked (it asked
+        # for sway accelerations the wrench solve then discarded, and drifted).
+        v_w = _world_vel(x)
+        sp_r = float(np.linalg.norm(v_r))
+        that = v_r / sp_r if sp_r > 1e-3 else np.array([np.cos(x[2]), np.sin(x[2])])
+        nhat = np.array([-that[1], that[0]])                 # left of the tangent
+        e_at, e_ct = float(err @ that) * -1.0, float(err @ nhat) * -1.0   # ref minus pos
+        u_now = float(v_w @ that)
+        udot_cmd = ec.kp * e_at + ec.kd * (sp_r - u_now)
+        e_ct_int = float(np.clip(e_ct_int + e_ct * dt, -ec.los_int_max, ec.los_int_max))
+        psi_cmd = psi_r + np.clip(np.arctan2(e_ct, ec.los_lookahead_m) + ec.ki_ct * e_ct_int,
+                                  -np.deg2rad(ec.los_max_deg), np.deg2rad(ec.los_max_deg))
         psi = x[2]
-        c, s = np.cos(psi), np.sin(psi)
-        uv_dot_cmd = np.array([c * acc_cmd[0] + s * acc_cmd[1],
-                               -s * acc_cmd[0] + c * acc_cmd[1]])
-        r_cmd_dot = ec.kpsi * _wrap(psi_r - psi) + ec.kr * (r_r - x[5])
-        nudot_cmd = np.array([uv_dot_cmd[0], uv_dot_cmd[1], r_cmd_dot])
+        r_cmd_dot = ec.kpsi * _wrap(psi_cmd - psi) + ec.kr * (r_r - x[5])
+        nudot_cmd = np.array([udot_cmd, 0.0, r_cmd_dot])
         tau_des = fossen.required_wrench(x[3:6][None], nudot_cmd[None], params)[0]
         wk = w_at(t)
         d2, u_star, _ = distance_batch(tau_des[None, None], h[None],

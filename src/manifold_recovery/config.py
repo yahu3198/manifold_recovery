@@ -133,6 +133,10 @@ class PlannerCfg:
 
 @dataclass(frozen=True)
 class ExactCfg:
+    los_lookahead_m: float = 10.0   # rev 4.2 line-of-sight guidance in the tier-2 rollout
+    los_max_deg: float = 45.0
+    ki_ct: float = 0.02             # integral on cross-track error (steady crab against sway)
+    los_int_max: float = 40.0       # m*s
     dt_sim: float = 0.1
     kp: float = 0.2
     kd: float = 0.9
