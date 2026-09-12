@@ -30,4 +30,7 @@ logs/
 .vscode/
 .idea/
 *.swp
-.DS_Store
+.DS_Store.venv/
+data_out/
+__pycache__/
+*.pyc
