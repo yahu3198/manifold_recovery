@@ -118,7 +118,8 @@ class EnergyOCP:
 
         # terminal inside zone
         Az, bz = zone.halfspaces()
-        opti.subject_to(ca.DM(Az) @ X[0:2, N] <= ca.DM(bz))
+        row_norm = np.linalg.norm(Az, axis=1)
+        opti.subject_to(ca.DM(Az) @ X[0:2, N] <= ca.DM(bz - pc.terminal_inset * row_norm))
         # arrive gently
         opti.subject_to(opti.bounded(-0.6, X[3, N], 1.2))
         opti.subject_to(opti.bounded(-0.6, X[4, N], 0.6))

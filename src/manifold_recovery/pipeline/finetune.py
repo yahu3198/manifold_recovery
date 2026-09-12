@@ -68,5 +68,5 @@ def finetune(reps: dict, decoded_xi: np.ndarray, decoded_psi: np.ndarray,
                                       "plan_feasible": plan.feasible,
                                       "plan_slack": plan.slack_total},
                              plan=plan))
-    out.sort(key=lambda c: (not c.cert.passed, c.plan_cost))
+    out.sort(key=lambda c: c.plan_cost)
     return out

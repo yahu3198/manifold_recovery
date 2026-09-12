@@ -92,7 +92,7 @@ def rollout_certify(xi_ref: np.ndarray, psi_ref: np.ndarray, T_h: float,
         if max_err > ec.e_max:
             return ExactResult(False, max_err, min_clear, arrival, energy,
                                "tracking_error")
-        if min_clear < 0.0:
+        if min_clear < ec.hull_radius:
             return ExactResult(False, max_err, min_clear, arrival, energy,
                                "collision")
         if np.isnan(arrival) and arrived(pos):
@@ -127,7 +127,7 @@ def rollout_certify(xi_ref: np.ndarray, psi_ref: np.ndarray, T_h: float,
 
     passed = not np.isnan(arrival)
     reason = "ok" if passed else "no_arrival"
-    return ExactResult(passed and max_err <= ec.e_max and min_clear >= 0.0,
+    return ExactResult(passed and max_err <= ec.e_max and min_clear >= ec.hull_radius,
                        max_err, min_clear, arrival, energy, reason)
 
 

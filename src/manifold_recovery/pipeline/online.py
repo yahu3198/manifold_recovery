@@ -119,7 +119,7 @@ class RecoveryPipeline:
                              self.planners, np.array([h1, h2]), ab, T_h, w_grid,
                              w_true, w_dt, self.field, cfg)
             tms["finetune_and_rollout"] = time.perf_counter() - t0
-        cands.sort(key=lambda cd: (not cd.cert.passed, cd.plan_cost))
+        cands.sort(key=lambda cd: cd.plan_cost)
         tms["total"] = sum(v for k, v in tms.items() if k != "total")
         return Proposal(candidates=cands[:cfg.online.k_present], alpha_bar=ab,
                         n_decoded=len(omega), n_certified=int(len(ok)), timings=tms,

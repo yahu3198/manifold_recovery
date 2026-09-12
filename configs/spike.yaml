@@ -36,5 +36,5 @@ data:
 model: {latent_dim: 2, w_pg: 10.0, hidden: [256, 256], gamma: 10.0, Cz_max: 5.0, a_shaping: 10.0,
         lr: 1.0e-3, batch: 256, epochs: 700, recon_sigma: 1.0, seed: 0}
 online: {K: 100, z_lo: -1.64, z_hi: 1.64, z_mode: bank, z_jitter: 0.15, k_present: 3, beta_max_deg: 25.0}
-planner: {N_ocp: 80, ipopt_max_iter: 400, ipopt_retries: 2, slack_tol: 0.5, dock_margin: 1.5, w_slack: 1.0e+4}
+planner: {N_ocp: 80, ipopt_max_iter: 400, ipopt_retries: 2, slack_tol: 0.5, dock_margin: 4.0, terminal_inset: 4.0, w_slack: 1.0e+4}
 exact: {dt_sim: 0.1, kp: 0.2, kd: 0.9, kpsi: 0.4, kr: 1.2, e_max: 5.0, arrive_tol: 1.5}
