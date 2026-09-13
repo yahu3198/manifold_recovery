@@ -179,6 +179,25 @@ class ManifoldSidecar(Node):
             log.update({"refined_published": False, "chosen_plan_cost": float("nan")})
         else:
             rows2 = plan_to_rows(chosen.plan, T_h, 0.05, feedforward=self.a.feedforward)
+            # rev 4.5.1: continuity gate. The vessel has been tracking the decoded
+            # reference since stage 1; replace it only if the refined plan, at the row
+            # that applies now, is close to the vessel's actual pose. Otherwise the
+            # switch is a reference discontinuity (seen at 95 %: a 37 m, 30 deg jump).
+            k = min(int(max(self.now() - self.t_trigger, 0.0) / 0.05), len(rows2) - 1)
+            st = self.state
+            dpos = math.hypot(rows2[k, 0] - st[0], rows2[k, 1] - st[1])
+            dpsi = abs((rows2[k, 2] - st[2] + math.pi) % (2 * math.pi) - math.pi)
+            log.update({"refined_gap_m": dpos, "refined_gap_deg": math.degrees(dpsi)})
+            if dpos > self.a.cont_pos_m or dpsi > math.radians(self.a.cont_psi_deg):
+                self.get_logger().warn(f"stage 2: refined plan is {dpos:.1f} m / {math.degrees(dpsi):.0f} deg "
+                                       f"from the vessel at receipt; not published, decoded reference stands")
+                log.update({"refined_published": False, "chosen_plan_cost": chosen.plan_cost,
+                            "refined_rejected": "discontinuous"})
+                self._log(log); self._publish_summary(prop, chosen, wall)
+                if self.marker_pub is not None:
+                    self._publish_markers(prop, chosen)
+                self.done = True
+                return
             msg2 = Float64MultiArray()
             msg2.data = rows_to_message_data(rows2, self.t_trigger, 0.05)
             self.ref_pub.publish(msg2)
@@ -238,6 +257,10 @@ def main():
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--window-s", type=float, default=60.0)
     p.add_argument("--min-history-s", type=float, default=20.0)
+    p.add_argument("--cont-pos-m", type=float, default=5.0,
+                   help="rev 4.5.1: publish the refined plan only if within this distance of the vessel at receipt")
+    p.add_argument("--cont-psi-deg", type=float, default=30.0,
+                   help="rev 4.5.1: ... and within this heading difference")
     p.add_argument("--feedforward", action="store_true", help="fill Tp, Ts from the plan (default zeros)")
     p.add_argument("--viz", action="store_true", help="publish RViz markers of the candidates")
     a, ros_args = p.parse_known_args()

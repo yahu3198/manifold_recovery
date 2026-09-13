@@ -35,9 +35,10 @@ PAT = re.compile(r"(?P<arm>[a-z0-9]+)_d(?P<deg>\d+)_ss(?P<ss>\d)_(?P<dir>benefic
 
 def score_one(bag: Path, post_fault_s: float, field: DockField, R0=0.001, gamma=0.0075):
     from rosbags.highlevel import AnyReader
+    from rosbags.typesys import Stores, get_typestore
     d = read_bag(bag)
     st = {"t_thr": [], "Tp": [], "Ts": [], "t_ms": [], "ms": []}
-    with AnyReader([bag]) as reader:
+    with AnyReader([bag], default_typestore=get_typestore(Stores.ROS2_HUMBLE)) as reader:
         conns = [c for c in reader.connections if c.topic in
                  ("/wamv/thrusters/left/thrust", "/wamv/thrusters/right/thrust", "/wamv/manifold_status")]
         for conn, ts, raw in reader.messages(connections=conns):

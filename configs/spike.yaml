@@ -16,7 +16,7 @@ wrench:
   gamma_R: 0.01        # FROM_REPO fallback (paper R(H)=R0+gamma*diag(1-h))
   kappa: 1.5           # EAMPC confidence policy
   eps_conf: 0.01
-score: {lambda_o: 1.0, lambda_s: 0.1, lambda_f: 10.0, lambda_e: 0.01, lambda_t: 10.0, eps_obs: 3.0}
+score:   {lambda_o: 1.0, lambda_s: 0.1, lambda_f: 10.0, lambda_e: 0.01, lambda_t: 10.0, eps_obs: 3.0} 
 data:
   n_samples: 8000
   h1_range: [0.05, 1.0]
@@ -36,5 +36,5 @@ data:
 model: {latent_dim: 2, w_pg: 10.0, hidden: [256, 256], gamma: 10.0, Cz_max: 5.0, a_shaping: 10.0,
         lr: 1.0e-3, batch: 256, epochs: 700, recon_sigma: 1.0, seed: 0}
 online: {K: 100, z_lo: -1.64, z_hi: 1.64, z_mode: bank, z_jitter: 0.15, k_present: 3, beta_max_deg: 25.0}
-planner: {N_ocp: 80, ipopt_max_iter: 400, ipopt_retries: 2, slack_tol: 0.5, dock_margin: 4.0, terminal_inset: 4.0, w_slack: 1.0e+4}
-exact: {dt_sim: 0.1, kp: 0.2, kd: 0.9, kpsi: 0.4, kr: 1.2, e_max: 5.0, arrive_tol: 1.5}
+planner: {N_ocp: 80, ipopt_max_iter: 400, ipopt_retries: 2, slack_tol: 0.5, dock_margin: 3.0, terminal_inset: 2.5, w_slack: 1.0e+4}
+exact: {dt_sim: 0.1, kp: 0.2, kd: 0.9, kpsi: 0.4, kr: 1.2, e_max: 5.0, arrive_tol: 1.5, hull_radius: 1.5}

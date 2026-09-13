@@ -126,8 +126,8 @@ class PlannerCfg:
     ipopt_max_iter: int = 400
     ipopt_retries: int = 2
     slack_tol: float = 0.5
-    dock_margin: float = 4.0        # rev 4.3: hull half-length 2.5 m + 1.5 m clearance (was 1.5)
-    terminal_inset: float = 4.0     # rev 4.3: terminal point at least this far inside the zone
+    dock_margin: float = 3.0        # rev 4.3: hull half-length 2.5 m + 1.5 m clearance (was 1.5)
+    terminal_inset: float = 2.5     # rev 4.3: terminal point at least this far inside the zone
     w_slack: float = 1e4
 
 
@@ -144,7 +144,7 @@ class ExactCfg:
     kr: float = 1.2
     e_max: float = 5.0
     arrive_tol: float = 1.5
-    hull_radius: float = 2.5        # rev 4.3: min centroid-to-dock clearance in the rollout (was 0)
+    hull_radius: float = 1.5        # rev 4.3: min centroid-to-dock clearance in the rollout (was 0)
 
 
 @dataclass(frozen=True)
