@@ -37,7 +37,7 @@ from std_msgs.msg import Float64MultiArray                     # noqa: E402
 
 from manifold_recovery.config import load                      # noqa: E402
 from manifold_recovery.io_bridge.forecast import ForceForecaster, sigma_theta_from_confidence  # noqa: E402
-from manifold_recovery.io_bridge.reference import plan_to_rows, rows_to_message_data  # noqa: E402
+from manifold_recovery.io_bridge.reference import plan_to_rows, decoded_to_rows, rows_to_message_data  # noqa: E402
 from manifold_recovery.scenario import ZONES                   # noqa: E402
 
 
@@ -110,6 +110,13 @@ class ManifoldSidecar(Node):
             from manifold_recovery.pipeline.online import RecoveryPipeline
             ckpt = self.a.ckpt if self.a.arm == "manifold" else None
             self.pipe = RecoveryPipeline(ckpt, self.cfg, seed=self.a.seed)
+            # rev 4.4: pay the CasADi/IPOPT problem construction now, not at fault time
+            from manifold_recovery.scenario import ZONES
+            for z in ZONES:
+                self.pipe.planners(z)
+            from manifold_recovery.pipeline.finetune import warm_pool
+            warm_pool(self.cfg)
+            self.get_logger().info("planners built and worker pool warm")
 
     def handle_fault(self):
         if self.state is None or not self.fc.ready(min_s=self.a.min_history_s):
@@ -123,40 +130,64 @@ class ManifoldSidecar(Node):
         w_hat, w_true, w_dt, fit = self.fc.forecast(T_h + 5.0, self.rng)
         sig = sigma_theta_from_confidence(self.conf, self.cfg.wrench.kappa, self.cfg.wrench.eps_conf)
         self._build_pipeline()
+        # ---- rev 4.5, stage 1: decode/sample + screen + cluster, publish the best
+        # certified decoded candidate immediately -----------------------------------
         t0 = time.perf_counter()
-        if self.a.arm == "manifold":
-            prop = self.pipe.propose(h1, h2, w_hat, sig, x0, w_true, w_dt)
-        else:
-            prop = self.pipe.propose_b4(h1, h2, w_hat, sig, x0, w_true, w_dt)
-        wall = time.perf_counter() - t0
+        s1 = self.pipe.propose_stage1(h1, h2, w_hat, sig, x0, w_true, w_dt, arm=self.a.arm)
+        wall1 = time.perf_counter() - t0
         log = {"trial_id": self.a.trial_id, "arm": self.a.arm, "t_trigger": self.t_trigger,
                "x0": x0.tolist(), "H": [h1, h2], "sigma_theta": sig, "confidence": self.conf,
-               "forecast_fit": fit, "n_decoded": prop.n_decoded, "n_certified": prop.n_certified,
-               "cert_breakdown": prop.cert_breakdown, "alpha_bar": prop.alpha_bar,
-               "timings": prop.timings, "wall_total_s": wall,
-               "candidates": [{"zone": c.zone_id, "signature": list(map(int, c.signature)),
-                               "plan_cost": c.plan_cost, "rollout_passed": bool(c.cert.passed),
-                               "rollout_reason": c.cert.reason,
-                               "plan_feasible": bool(c.timings.get("plan_feasible", False))}
-                              for c in prop.candidates]}
-        chosen = next((c for c in prop.candidates if c.plan is not None), None)
-        if chosen is None:
-            self.get_logger().error(f"no candidate to publish (certified {prop.n_certified}/{prop.n_decoded}); "
+               "forecast_fit": fit, "n_decoded": s1.n_decoded, "n_certified": s1.n_certified,
+               "cert_breakdown": s1.cert.failure_breakdown(), "alpha_bar": s1.alpha_bar,
+               "stage1_wall_s": wall1,
+               "decoded": [{"zone": d.zone_id, "signature": list(map(int, d.signature)),
+                            "max_d2": d.max_d2, "min_clear": d.min_clear} for d in s1.decoded]}
+        if not s1.decoded:
+            self.get_logger().error(f"no certified candidate (certified {s1.n_certified}/{s1.n_decoded}); "
                                     f"MPC will fall back after its timeout")
-            log["published"] = False
-            self._log(log); self._publish_summary(prop, None, wall); self.done = True
+            log.update({"published": False, "refined_published": False, "timings": s1.timings})
+            self._log(log); self.done = True
             return
-        rows = plan_to_rows(chosen.plan, T_h, 0.05, feedforward=self.a.feedforward)
+        best = s1.decoded[0]
+        rows = decoded_to_rows(best.pos, best.vel, best.psi, T_h, 0.05)
         msg = Float64MultiArray()
         msg.data = rows_to_message_data(rows, self.t_trigger, 0.05)
         self.ref_pub.publish(msg)
-        log.update({"published": True, "chosen_zone": chosen.zone_id,
-                    "chosen_signature": list(map(int, chosen.signature)),
-                    "chosen_plan_cost": chosen.plan_cost, "rows": int(len(rows)),
-                    "publish_latency_s": self.now() - self.t_trigger})
-        self.get_logger().info(f"published {len(rows)} rows -> {ZONES[chosen.zone_id].name} "
-                               f"(class {chosen.signature}), latency {log['publish_latency_s']:.2f}s, "
-                               f"certified {prop.n_certified}/{prop.n_decoded}")
+        log.update({"published": True, "published_stage": "decoded",
+                    "chosen_zone": best.zone_id, "chosen_signature": list(map(int, best.signature)),
+                    "rows": int(len(rows)), "publish_latency_s": self.now() - self.t_trigger})
+        self.get_logger().info(f"stage 1: published {len(rows)} decoded rows -> {ZONES[best.zone_id].name} "
+                               f"(class {best.signature}), latency {log['publish_latency_s']:.2f}s, "
+                               f"certified {s1.n_certified}/{s1.n_decoded}")
+        self._log(log)
+
+        # ---- stage 2: OCP refinement; replaces the reference only if a refined plan
+        # is feasible (converged, slack within tolerance) -----------------------------
+        t0 = time.perf_counter()
+        prop = self.pipe.refine_stage2(s1)
+        wall = wall1 + (time.perf_counter() - t0)
+        log.update({"timings": prop.timings, "wall_total_s": wall,
+                    "candidates": [{"zone": c.zone_id, "signature": list(map(int, c.signature)),
+                                    "plan_cost": c.plan_cost, "rollout_passed": bool(c.cert.passed),
+                                    "rollout_reason": c.cert.reason,
+                                    "plan_feasible": bool(c.timings.get("plan_feasible", False))}
+                                   for c in prop.candidates]})
+        chosen = next((c for c in prop.candidates
+                       if c.plan is not None and bool(c.timings.get("plan_feasible", False))), None)
+        if chosen is None:
+            self.get_logger().warn("stage 2: no feasible refined plan; the decoded reference stands")
+            log.update({"refined_published": False, "chosen_plan_cost": float("nan")})
+        else:
+            rows2 = plan_to_rows(chosen.plan, T_h, 0.05, feedforward=self.a.feedforward)
+            msg2 = Float64MultiArray()
+            msg2.data = rows_to_message_data(rows2, self.t_trigger, 0.05)
+            self.ref_pub.publish(msg2)
+            log.update({"refined_published": True, "published_stage": "refined",
+                        "chosen_zone": chosen.zone_id, "chosen_signature": list(map(int, chosen.signature)),
+                        "chosen_plan_cost": chosen.plan_cost, "rows": int(len(rows2)),
+                        "refine_latency_s": self.now() - self.t_trigger})
+            self.get_logger().info(f"stage 2: published {len(rows2)} refined rows -> {ZONES[chosen.zone_id].name} "
+                                   f"(class {chosen.signature}), latency {log['refine_latency_s']:.2f}s")
         self._log(log); self._publish_summary(prop, chosen, wall)
         if self.marker_pub is not None:
             self._publish_markers(prop, chosen)
@@ -217,7 +248,8 @@ def main():
     except KeyboardInterrupt:
         pass
     node.destroy_node()
-    rclpy.shutdown()
+    if rclpy.ok():
+        rclpy.shutdown()
 
 
 if __name__ == "__main__":

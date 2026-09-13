@@ -87,7 +87,7 @@ class CertResult:
 
     @property
     def clear_ok(self):
-        return self.min_clear >= 0.0
+        return self._clear_ok
 
     def failure_breakdown(self) -> dict:
         n = max(int(np.prod(self.mask.shape)), 1)
@@ -125,10 +125,12 @@ def certify_batch(omega: np.ndarray, x0: np.ndarray,
     min_clear = d.min(axis=-1)
     thrust_ok = max_d2 <= cfg.wrench.eps_cert
     sway_ok = sway_drift <= cfg.wrench.sway_drift_rate
-    mask = thrust_ok & sway_ok & (min_clear >= 0.0) & term
+    clear_ok = min_clear >= cfg.exact.hull_radius      # rev 4.5: hull radius in tier 1 too
+    mask = thrust_ok & sway_ok & clear_ok & term
     res = CertResult(mask=mask, max_d2=max_d2, max_sway=max_sway, sway_drift=sway_drift,
                      max_d2_total=d2_tot.max(axis=-1), min_clear=min_clear,
                      terminal_ok=term, alpha_bar=ab)
     res._thrust_ok = thrust_ok
+    res._clear_ok = clear_ok
     res._sway_ok = sway_ok
     return res
