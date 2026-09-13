@@ -50,11 +50,12 @@ def _wrap(a):
 def read_bag(bag: Path):
     """Returns dict of time-stamped series (seconds) from one bag."""
     from rosbags.highlevel import AnyReader
+    from rosbags.typesys import Stores, get_typestore
     out = {"t_w": [], "w": [], "t_c": [], "conf": [], "t_o": [], "psi": [], "pos": [],
            "t_h": [], "h": []}
     want = {"/wamv/disturbance", "/wamv/prediction_metrics",
             "/wamv/sensors/position/ground_truth_odometry", "/wamv/thruster_health"}
-    with AnyReader([bag]) as reader:
+    with AnyReader([bag], default_typestore=get_typestore(Stores.ROS2_HUMBLE)) as reader:
         conns = [c for c in reader.connections if c.topic in want]
         for conn, ts, raw in reader.messages(connections=conns):
             m = reader.deserialize(raw, conn.msgtype); t = ts * 1e-9
