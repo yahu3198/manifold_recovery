@@ -16,6 +16,8 @@ runs/
 *.png
 *.pdf
 *.csv
+*.json
+*.npy
 
 # checkpoints (see note below)
 *.pt
