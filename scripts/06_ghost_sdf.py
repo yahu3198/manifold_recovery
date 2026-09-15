@@ -5,7 +5,8 @@ One static model, no collision elements, no plugins:
   * one link per ghost with the WAM-V hull mesh (visual only), transparency
     fading from --alpha-first at the fault to opaque at the terminal instant
   * the ground-truth track as a chain of thin boxes (blue)
-  * every published reference as a chain of thin boxes (red; replans lighter)
+  * the first (red) and last (orange) published reference; --refs all for every replan
+  * the same-seed internal-planner ground truth as a thin grey line (--no-baselines to omit)
   * optional flat label tiles are not included: add "50 %, aligned" etc. in the
     figure layout, not in Gazebo.
 
@@ -28,7 +29,8 @@ import numpy as np
 
 TRACK_RGBA = (0.10, 0.40, 0.95, 1.0)      # ground truth
 REF_RGBA = (0.90, 0.10, 0.10, 1.0)        # stage-1 reference
-REPLAN_RGBA = (1.00, 0.55, 0.15, 1.0)     # replans
+REPLAN_RGBA = (1.00, 0.55, 0.15, 1.0)     # final replanned plan
+BASE_RGBA = (0.55, 0.55, 0.55, 1.0)       # baseline arms (internal planner), ground truth
 
 
 def _pose(x, y, z, yaw):
@@ -111,6 +113,10 @@ def build(cell: dict, a) -> str:
         for k, r in refs:
             rgba = REF_RGBA if k == 0 else REPLAN_RGBA
             links.append(polyline_link(f"ref_{k}", r["xy"], rgba, 0.7 * a.line_width, a.z_line + 0.02, a.line_step))
+    if not a.no_baselines:
+        for bname, b in cell.get("baselines", {}).items():
+            links.append(polyline_link(f"base_{bname}", b["track"], BASE_RGBA, a.baseline_width,
+                                       a.z_line - 0.02, a.line_step))
     name = f"ghosts_{cell['cell']}"
     body = "\n".join(l for l in links if l)
     return (f'<?xml version="1.0"?>\n<sdf version="1.8">\n<model name="{name}">\n'
@@ -132,14 +138,17 @@ def main():
     p.add_argument("--no-texture", action="store_true", help="skip the PBR hull textures")
     p.add_argument("--no-fade", dest="fade", action="store_false")
     p.add_argument("--no-track", action="store_true")
-    p.add_argument("--refs", default="all", choices=["all", "first", "first+last", "none"],
+    p.add_argument("--no-baselines", action="store_true", help="omit the internal-planner track")
+    p.add_argument("--baseline-width", type=float, default=0.3, help="baseline line width (m)")
+    p.add_argument("--refs", default="first+last", choices=["all", "first", "first+last", "none"],
                    help="which published references to draw")
     a = p.parse_args()
     for cj in a.cell_json:
         cj = Path(cj).expanduser(); cell = json.loads(cj.read_text())
         out = cj.with_name(cj.stem + "_ghosts.sdf")
         out.write_text(build(cell, a))
-        print(f"{out}: {len(cell['ghosts'])} ghosts, {len(cell['refs'])} references")
+        print(f"{out}: {len(cell['ghosts'])} ghosts, {len(cell['refs'])} references "
+              f"(drawing {a.refs}), baselines {list(cell.get('baselines', {}))}")
 
 
 if __name__ == "__main__":

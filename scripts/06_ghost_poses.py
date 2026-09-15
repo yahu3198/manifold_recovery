@@ -106,6 +106,37 @@ def world_name(world_sdf: Path) -> str:
         return "default"
 
 
+def terminal_index(pos: np.ndarray, field: DockField):
+    """First zone entry, else first pier contact, else closest approach; same rules as score_trials.py."""
+    z = zone_of(pos); hit = np.flatnonzero(z >= 0)
+    sd = field.signed_distance(pos); col = np.flatnonzero(sd < 0)
+    try:
+        from shapely.geometry import Polygon, Point
+        polys = [Polygon(zn.vertices) for zn in ZONES]
+        dz = np.array([min(pg.distance(Point(x, y)) for pg in polys) for x, y in pos])
+    except Exception:
+        dz = np.full(len(pos), np.nan)
+    if len(hit) and (not len(col) or hit[0] <= col[0]):
+        return int(hit[0]), f"arrived zone {int(z[hit[0]]) + 1}"
+    if len(col):
+        return int(col[0]), "pier contact"
+    return int(np.nanargmin(dz)), f"closest approach {float(np.nanmin(dz)):.1f} m"
+
+
+def extract_track(bag: Path, track_step: float, field: DockField) -> dict:
+    """Ground-truth track only (for baseline arms drawn as a line, no ghosts)."""
+    d = read_bag(bag)
+    fi = np.flatnonzero(d["h"].min(axis=1) < 99.9)
+    if len(fi) == 0:
+        raise RuntimeError("no fault in bag")
+    t_f = float(d["t_h"][fi[0]])
+    sel = (d["t_o"] >= t_f) & (d["t_o"] <= t_f + EXT_S)
+    pos = d["pos"][sel]
+    i_end, outcome = terminal_index(pos, field)
+    return {"outcome": outcome, "t_end_since_fault": float(d["t_o"][sel][i_end] - t_f),
+            "track": resample_by_arclength(pos[: i_end + 1], track_step).tolist()}
+
+
 def extract(bag: Path, manifest: dict | None, spacing: float, track_step: float, field: DockField):
     d = read_bag(bag)
     if len(d["t_h"]) == 0 or len(d["t_o"]) == 0:
@@ -119,21 +150,7 @@ def extract(bag: Path, manifest: dict | None, spacing: float, track_step: float,
     sel = (d["t_o"] >= t_f) & (d["t_o"] <= t_f + EXT_S)
     t_o, pos, psi = d["t_o"][sel], d["pos"][sel], np.unwrap(d["psi"][sel])
 
-    # terminal instant, same rules as score_trials.py
-    z = zone_of(pos); hit = np.flatnonzero(z >= 0)
-    sd = field.signed_distance(pos); col = np.flatnonzero(sd < 0)
-    try:
-        from shapely.geometry import Polygon, Point
-        polys = [Polygon(zn.vertices) for zn in ZONES]
-        dz = np.array([min(pg.distance(Point(x, y)) for pg in polys) for x, y in pos])
-    except Exception:
-        dz = np.full(len(pos), np.nan)
-    if len(hit) and (not len(col) or hit[0] <= col[0]):
-        i_end, outcome = int(hit[0]), f"arrived zone {int(z[hit[0]]) + 1}"
-    elif len(col):
-        i_end, outcome = int(col[0]), "pier contact"
-    else:
-        i_end, outcome = int(np.nanargmin(dz)), f"closest approach {float(np.nanmin(dz)):.1f} m"
+    i_end, outcome = terminal_index(pos, field)
     t_end = float(t_o[i_end])
 
     # published references
@@ -178,10 +195,16 @@ def preview(cell: dict, out: Path):
     from manifold_recovery.analysis.plots import _draw_harbor
     fig, ax = plt.subplots(figsize=(7, 5))
     _draw_harbor(ax)
-    for i, r in enumerate(cell["refs"]):
+    for name, b in cell.get("baselines", {}).items():
+        bt = np.asarray(b["track"])
+        if len(bt):
+            ax.plot(bt[:, 0], bt[:, 1], color="0.45", lw=0.9, ls="--", label=f"{name} planner ({b['outcome']})")
+    refs = cell["refs"]
+    shown = refs if len(refs) <= 2 else [refs[0], refs[-1]]
+    for i, r in enumerate(shown):
         xy = np.asarray(r["xy"])
-        ax.plot(xy[:, 0], xy[:, 1], color="red", lw=0.8, alpha=0.9 if i == 0 else 0.5,
-                label="published reference" if i == 0 else None)
+        ax.plot(xy[:, 0], xy[:, 1], color="red" if i == 0 else "darkorange", lw=0.9,
+                label="initial certified plan" if i == 0 else "final replanned plan")
     tr = np.asarray(cell["track"])
     if len(tr):
         ax.plot(tr[:, 0], tr[:, 1], color="tab:blue", lw=1.4, label="ground truth")
@@ -213,6 +236,8 @@ def main():
                    help="per-severity ghost spacing in s, e.g. 0.5=25 0.8=30 0.95=40")
     p.add_argument("--track-step", type=float, default=2.0)
     p.add_argument("--seed", nargs="*", default=[], help="override: CELL=SEED, e.g. d80_nominal=0353")
+    p.add_argument("--baselines", nargs="*", default=["internal"],
+                   help="other arms whose same-seed ground-truth track is added as a line (no ghosts)")
     a = p.parse_args()
 
     spacing = dict(DEFAULT_SPACING)
@@ -249,6 +274,19 @@ def main():
                         "scored": {k: (None if pd.isna(row.get(k)) else float(row.get(k)))
                                    for k in ("time_to_zone_s", "dist_to_zone_min_m", "energy_N2s")
                                    if k in row}})
+            rec["baselines"] = {}
+            for barm in a.baselines:
+                bsub = df[(df.arm == barm) & np.isclose(df.degradation, deg)
+                          & (df.direction == direction) & (df.seed == int(row.seed))]
+                if bsub.empty:
+                    print(f"   no {barm} trial with seed {int(row.seed)}; skipped"); continue
+                btid = bsub.iloc[0].trial_id
+                try:
+                    b = extract_track(bags / btid, a.track_step, field); b["trial_id"] = btid
+                    rec["baselines"][barm] = b
+                    print(f"   {barm}: {btid} ({b['outcome']} at {b['t_end_since_fault']:.0f} s)")
+                except Exception as e:
+                    print(f"   {barm}: {btid} failed: {e}")
             (out / f"{cell}.json").write_text(json.dumps(rec, indent=1))
             preview(rec, out / f"{cell}_preview.png")
             print(f"   {rec['outcome']}, {len(rec['ghosts'])} ghosts, {len(rec['refs'])} references, "
