@@ -21,12 +21,13 @@ import sys
 from pathlib import Path
 
 import numpy as np
+EXT_S = 400.0   # rev 4.7.2 secondary time criterion (s after the fault)
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from manifold_recovery.scenario import zone_of                        # noqa: E402
+from manifold_recovery.scenario import zone_of, ZONES                 # noqa: E402
 from manifold_recovery.score.obstacles import DockField               # noqa: E402
 from manifold_recovery.io_bridge.bag_reader import read_bag, extract_force_segments  # noqa: E402
 
@@ -57,6 +58,15 @@ def score_one(bag: Path, post_fault_s: float, field: DockField, R0=0.001, gamma=
     pos = d["pos"][sel]; t_o = d["t_o"][sel]
     z = zone_of(pos)
     hit = np.flatnonzero(z >= 0)
+    # rev 4.7.3: continuous progress measure, distance from the vessel to the nearest
+    # zone polygon (0 inside), at the end of the trial and its minimum over the trial
+    try:
+        from shapely.geometry import Polygon, Point
+        polys = [Polygon(zn.vertices) for zn in ZONES]
+        dz = np.array([min(pg.distance(Point(x, y)) for pg in polys) for x, y in pos])
+        dist_end_m, dist_min_m = float(dz[-1]), float(dz.min())
+    except Exception:
+        dist_end_m, dist_min_m = np.nan, np.nan
     sd = field.signed_distance(pos)
     t_arr = float(t_o[hit[0]] - t_f) if len(hit) else np.nan
     collided = bool((sd < 0).any())
@@ -75,9 +85,12 @@ def score_one(bag: Path, post_fault_s: float, field: DockField, R0=0.001, gamma=
             v = ms[:, 2][ms[:, 2] >= 0]; lat = float(v[0]) if len(v) else np.nan
             fb = bool((ms[:, 3] > 0.5).any())
     return {"t_fault": t_f, "h1": float(h_after[0]), "h2": float(h_after[1]),
-            "success": bool(len(hit)) and not collided, "arrived": bool(len(hit)),
+            "success": bool(len(hit)) and not collided and t_arr <= 180.0,   # pre-registered: 180 s
+            "success_ext": bool(len(hit)) and not collided and t_arr <= EXT_S,   # secondary: EXT_S
+            "arrived": bool(len(hit)),
             "zone": int(z[hit[0]]) if len(hit) else -1, "time_to_zone_s": t_arr,
             "collided": collided, "min_clearance_m": float(sd.min()) if len(sd) else np.nan,
+            "dist_to_zone_end_m": dist_end_m, "dist_to_zone_min_m": dist_min_m,
             "energy_N2s": e_raw, "effort_weighted": e_w, "ref_latency_s": lat, "fallback": fb,
             "final_x": float(pos[-1, 0]) if len(pos) else np.nan,
             "final_y": float(pos[-1, 1]) if len(pos) else np.nan}
@@ -111,7 +124,7 @@ def main():
     ok = df[df.get("error").isna()] if "error" in df else df
     if len(ok):
         g = ok.groupby(["arm", "degradation", "direction"]).agg(
-            n=("success", "size"), success_rate=("success", "mean"), collided=("collided", "mean"),
+            n=("success", "size"), success_rate=("success", "mean"), success_ext=("success_ext", "mean"), collided=("collided", "mean"), dist_end_m=("dist_to_zone_end_m", "median"), dist_min_m=("dist_to_zone_min_m", "median"),
             fallback=("fallback", "mean"), time_to_zone_s=("time_to_zone_s", "median"),
             energy_N2s=("energy_N2s", "median"), latency_s=("ref_latency_s", "median"))
         g.to_csv(out / "summary.csv")

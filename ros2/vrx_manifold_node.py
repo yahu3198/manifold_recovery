@@ -59,6 +59,13 @@ class ManifoldSidecar(Node):
         self.conf = 0.5
         self.triggered = False
         self.done = False
+        # rev 4.7.2: event-triggered replanning (paper Sec. III-G): re-run stage 1 from the
+        # current state when the cross-track error to the tracked reference exceeds
+        # --replan-err-m, at most every --replan-min-s, up to --max-replans times.
+        self.ref_rows = None; self.ref_t0 = None; self.last_pub = None
+        self.replans = []; self.completed = False
+        self.create_timer(1.0, self._monitor)
+        self.create_subscription(Float64MultiArray, '/wamv/manifold_status', self._on_status, 10)
         self.t_trigger = None
         self.rng = np.random.default_rng(a.seed)
         qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
@@ -153,6 +160,8 @@ class ManifoldSidecar(Node):
         msg = Float64MultiArray()
         msg.data = rows_to_message_data(rows, self.t_trigger, 0.05)
         self.ref_pub.publish(msg)
+        self.ref_rows, self.ref_t0, self.last_pub = rows, self.t_trigger, self.now()
+        self.log0 = log
         log.update({"published": True, "published_stage": "decoded",
                     "chosen_zone": best.zone_id, "chosen_signature": list(map(int, best.signature)),
                     "rows": int(len(rows)), "publish_latency_s": self.now() - self.t_trigger})
@@ -201,6 +210,7 @@ class ManifoldSidecar(Node):
             msg2 = Float64MultiArray()
             msg2.data = rows_to_message_data(rows2, self.t_trigger, 0.05)
             self.ref_pub.publish(msg2)
+            self.ref_rows, self.ref_t0, self.last_pub = rows2, self.t_trigger, self.now()
             log.update({"refined_published": True, "published_stage": "refined",
                         "chosen_zone": chosen.zone_id, "chosen_signature": list(map(int, chosen.signature)),
                         "chosen_plan_cost": chosen.plan_cost, "rows": int(len(rows2)),
@@ -225,6 +235,68 @@ class ManifoldSidecar(Node):
                   float(prop.timings.get("decode", 0.0)), float(prop.timings.get("certify", 0.0)),
                   float(prop.timings.get("finetune_and_rollout", 0.0)), float(wall)]
         self.prop_pub.publish(m)
+
+    def _on_status(self, m):
+        if len(m.data) >= 8 and m.data[7] > 0.5:
+            self.completed = True
+
+    def _monitor(self):
+        if self.ref_rows is None or self.completed or self.state is None:
+            return
+        if len(self.replans) >= self.a.max_replans or self.now() - self.last_pub < self.a.replan_min_s:
+            return
+        k = min(int(max(self.now() - self.ref_t0, 0.0) / 0.05), len(self.ref_rows) - 1)
+        # rev 4.7.3: lateral deviation = distance to the nearest REMAINING point of the
+        # reference path (from the row that applies now to the end), so that a vessel
+        # that is merely slower than the reference (along-track lag) does not replan.
+        seg = self.ref_rows[k:, :2]
+        err = float(np.min(np.hypot(seg[:, 0] - self.state[0], seg[:, 1] - self.state[1])))
+        if err < self.a.replan_err_m:
+            return
+        self._replan(err)
+
+    def _replan(self, err):
+        """Stage 1 again from the current state; the new reference starts where the
+        vessel is, so it is continuous by construction. No stage 2 (time)."""
+        h1, h2 = float(self.h[0]), float(self.h[1])
+        T_h, _ = self._horizon()
+        try:
+            w_hat, w_true, w_dt, fit = self.fc.forecast(T_h + 5.0, self.rng)
+        except Exception as e:
+            self.get_logger().warn(f"replan: forecast failed ({e})"); return
+        sig = sigma_theta_from_confidence(self.conf, self.cfg.wrench.kappa, self.cfg.wrench.eps_conf)
+        x0 = self.state.copy()
+        t0w = time.perf_counter()
+        s1 = self.pipe.propose_stage1(h1, h2, w_hat, sig, x0, w_true, w_dt, arm=self.a.arm)
+        wall = time.perf_counter() - t0w
+        rec = {"t_since_fault": self.now() - self.t_trigger, "cross_track_err_m": err,
+               "n_certified": s1.n_certified, "wall_s": wall}
+        if not s1.decoded:
+            rec["published"] = False
+            self.get_logger().warn(f"replan at {rec['t_since_fault']:.0f}s: err {err:.1f} m, nothing certified")
+        else:
+            best = s1.decoded[0]
+            # rev 4.7.4: re-parametrise the replan to the design speed. The decoded path
+            # is defined on the full T_h; near the end that spreads a few metres over
+            # 150 s and the MPC crawls. Horizon = path length / replan_speed, clamped to
+            # [replan_min_horizon, T_h]; velocities scale by T_h / T_plan. The screen
+            # certified the candidate at the slower T_h profile; the faster profile is
+            # at most the nominal design speed of the original plan.
+            L = float(np.sum(np.hypot(np.diff(best.pos[:, 0]), np.diff(best.pos[:, 1]))))
+            T_plan = float(np.clip(L / self.a.replan_speed, self.a.replan_min_horizon, T_h))
+            rows = decoded_to_rows(best.pos, best.vel * (T_h / T_plan), best.psi, T_plan, 0.05)
+            t0 = self.now()
+            msg = Float64MultiArray(); msg.data = rows_to_message_data(rows, t0, 0.05)
+            self.ref_pub.publish(msg)
+            self.ref_rows, self.ref_t0, self.last_pub = rows, t0, t0
+            rec.update({"published": True, "zone": best.zone_id, "signature": list(map(int, best.signature)),
+                        "rows": int(len(rows)), "path_len_m": L, "T_plan_s": T_plan})
+            self.get_logger().info(f"replan at {rec['t_since_fault']:.0f}s: err {err:.1f} m -> "
+                                   f"{ZONES[best.zone_id].name} (class {best.signature}), {s1.n_certified}/{s1.n_decoded} certified, {wall:.2f}s")
+        self.replans.append(rec)
+        if hasattr(self, "log0"):
+            self.log0["replans"] = self.replans
+            self._log(self.log0)
 
     def _log(self, d):
         out = Path(self.a.log_dir).expanduser(); out.mkdir(parents=True, exist_ok=True)
@@ -257,6 +329,11 @@ def main():
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--window-s", type=float, default=60.0)
     p.add_argument("--min-history-s", type=float, default=20.0)
+    p.add_argument("--replan-err-m", type=float, default=5.0, help="rev 4.7.2: cross-track error that triggers a stage-1 replan")
+    p.add_argument("--replan-min-s", type=float, default=15.0)
+    p.add_argument("--max-replans", type=int, default=20)
+    p.add_argument("--replan-speed", type=float, default=0.7, help="rev 4.7.4: design speed (m/s) for re-parametrised replans")
+    p.add_argument("--replan-min-horizon", type=float, default=40.0)
     p.add_argument("--cont-pos-m", type=float, default=5.0,
                    help="rev 4.5.1: publish the refined plan only if within this distance of the vessel at receipt")
     p.add_argument("--cont-psi-deg", type=float, default=30.0,
