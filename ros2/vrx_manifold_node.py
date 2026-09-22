@@ -76,6 +76,10 @@ class ManifoldSidecar(Node):
         self.create_subscription(Float64MultiArray, "/wamv/prediction_metrics", self.on_pred, qos)
         self.ref_pub = self.create_publisher(Float64MultiArray, "/wamv/manifold_ref", 10)
         self.prop_pub = self.create_publisher(Float64MultiArray, "/wamv/manifold_proposal", 10)
+        # dashboard feed (rev 4.8): every decoded candidate with its screen verdict,
+        # so the Qt dashboard can draw the fan of Fig. 1 live. Layout in
+        # _publish_candidates. Always on; it costs one message per planning event.
+        self.cand_pub = self.create_publisher(Float64MultiArray, "/wamv/manifold_candidates", 10)
         self.marker_pub = None
         if a.viz:
             from visualization_msgs.msg import MarkerArray
@@ -153,9 +157,11 @@ class ManifoldSidecar(Node):
             self.get_logger().error(f"no certified candidate (certified {s1.n_certified}/{s1.n_decoded}); "
                                     f"MPC will fall back after its timeout")
             log.update({"published": False, "refined_published": False, "timings": s1.timings})
+            self._publish_candidates(s1, event=0, chosen_idx=-1)
             self._log(log); self.done = True
             return
         best = s1.decoded[0]
+        self._publish_candidates(s1, event=0, chosen_idx=best.idx)
         rows = decoded_to_rows(best.pos, best.vel, best.psi, T_h, 0.05)
         msg = Float64MultiArray()
         msg.data = rows_to_message_data(rows, self.t_trigger, 0.05)
@@ -203,6 +209,7 @@ class ManifoldSidecar(Node):
                 log.update({"refined_published": False, "chosen_plan_cost": chosen.plan_cost,
                             "refined_rejected": "discontinuous"})
                 self._log(log); self._publish_summary(prop, chosen, wall)
+                self._publish_candidates(s1, event=1, chosen_idx=-1, refined=prop.candidates, chosen_refined=None)
                 if self.marker_pub is not None:
                     self._publish_markers(prop, chosen)
                 self.done = True
@@ -218,9 +225,83 @@ class ManifoldSidecar(Node):
             self.get_logger().info(f"stage 2: published {len(rows2)} refined rows -> {ZONES[chosen.zone_id].name} "
                                    f"(class {chosen.signature}), latency {log['refine_latency_s']:.2f}s")
         self._log(log); self._publish_summary(prop, chosen, wall)
+        self._publish_candidates(s1, event=1, chosen_idx=-1, refined=prop.candidates,
+                                 chosen_refined=chosen if log.get("refined_published") else None)
         if self.marker_pub is not None:
             self._publish_markers(prop, chosen)
         self.done = True
+
+    # ---- dashboard feed ----------------------------------------------------
+    CAND_PTS = 40   # waypoints sent per candidate (80 -> 40 keeps 100 candidates at ~8 kfloat)
+
+    @staticmethod
+    def _subsample(pos: np.ndarray, n: int) -> np.ndarray:
+        idx = np.linspace(0, len(pos) - 1, n).round().astype(int)
+        return np.asarray(pos, float)[idx, :2]
+
+    def _publish_candidates(self, s1, event: int, chosen_idx: int, refined=None, chosen_refined=None):
+        """Self-describing Float64MultiArray for wamv_dashboard_node (/wamv/manifold_candidates).
+
+        header (8): [event, t_since_fault, n_decoded, n_certified, n_classes, n_pts, n_cands, chosen_slot]
+            event  0 = stage 1 at the fault, 1 = stage 2 refined, 2 = stage-1 replan
+        per candidate (4 + 2*n_pts): [status, zone, w_dock1, w_dock2, x_0, y_0, ..., x_{n-1}, y_{n-1}]
+            status -1 thrust residual over tolerance   (Eq. 11)
+                   -2 hull inside the obstacle set     (Eq. 13)
+                   -3 terminal point outside a zone    (Eq. 14)
+                   -4 sway drift over tolerance        (Eq. 12)
+                    1 passed the screen
+                    2 class representative (best in its (zone, winding) class)
+                    3 representative published as the decoded reference
+                    4 refined by the energy OCP, not published
+                    5 refined and published (replaces the decoded reference)
+        Event 1 carries only the refined candidates; the dashboard keeps the stage-1 fan.
+        """
+        from manifold_recovery.certify.cluster import side_signature
+        n_pts = self.CAND_PTS
+        t_since = (self.now() - self.t_trigger) if self.t_trigger is not None else -1.0
+        rows = []
+        if event in (0, 2):
+            cert = s1.cert
+            kin = s1.kin_all
+            if kin is None:                       # nothing passed; kinematics were never built
+                kin = self.pipe.rtp.kinematics(s1.omega, np.asarray(s1.x0[:3], float))
+            pos_all = np.asarray(kin.pos, float)   # (K, N, 2)
+            sig_all = side_signature(pos_all)      # (K, 3): zone, w1, w2
+            rep_idx = set(int(i) for i in s1.reps.values())
+            thrust_ok = np.asarray(cert.thrust_ok).reshape(-1)
+            clear_ok = np.asarray(cert.clear_ok).reshape(-1)
+            term_ok = np.asarray(cert.terminal_ok).reshape(-1)
+            mask = np.asarray(cert.mask).reshape(-1)
+            for i in range(len(pos_all)):
+                if mask[i]:
+                    st = 3 if i == chosen_idx else (2 if i in rep_idx else 1)
+                elif not thrust_ok[i]:
+                    st = -1
+                elif not clear_ok[i]:
+                    st = -2
+                elif not term_ok[i]:
+                    st = -3
+                else:
+                    st = -4
+                rows.append((st, int(sig_all[i, 0]), int(sig_all[i, 1]), int(sig_all[i, 2]),
+                             self._subsample(pos_all[i], n_pts)))
+        else:
+            for c in (refined or []):
+                if c.plan is None or not bool(c.timings.get("plan_feasible", False)):
+                    continue
+                st = 5 if (chosen_refined is not None and c is chosen_refined) else 4
+                sig = tuple(int(v) for v in c.signature)
+                w1, w2 = (sig[-2], sig[-1]) if len(sig) >= 2 else (0, 0)
+                rows.append((st, int(c.zone_id), w1, w2, self._subsample(c.xi, n_pts)))
+        chosen_slot = next((k for k, r in enumerate(rows) if r[0] in (3, 5)), -1)
+        n_classes = len(s1.reps) if s1.reps else 0
+        data = [float(event), float(t_since), float(s1.n_decoded), float(s1.n_certified),
+                float(n_classes), float(n_pts), float(len(rows)), float(chosen_slot)]
+        for st, z, w1, w2, pts in rows:
+            data.extend([float(st), float(z), float(w1), float(w2)])
+            data.extend(pts.reshape(-1).tolist())
+        m = Float64MultiArray(); m.data = data
+        self.cand_pub.publish(m)
 
     # ---- helpers -----------------------------------------------------------
     def _horizon(self):
@@ -271,6 +352,7 @@ class ManifoldSidecar(Node):
         wall = time.perf_counter() - t0w
         rec = {"t_since_fault": self.now() - self.t_trigger, "cross_track_err_m": err,
                "n_certified": s1.n_certified, "wall_s": wall}
+        self._publish_candidates(s1, event=2, chosen_idx=s1.decoded[0].idx if s1.decoded else -1)
         if not s1.decoded:
             rec["published"] = False
             self.get_logger().warn(f"replan at {rec['t_since_fault']:.0f}s: err {err:.1f} m, nothing certified")
